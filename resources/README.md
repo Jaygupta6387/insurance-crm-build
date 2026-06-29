@@ -1,18 +1,21 @@
 # InsureCRM Desktop Resources
 
-Place bundled PostgreSQL binaries here for production builds:
+## PostgreSQL (required for Windows/macOS production builds)
 
-- `postgresql-win/bin/` — Windows PostgreSQL 16 portable binaries (`pg_ctl.exe`, `initdb.exe`, etc.)
-- `postgresql-mac/bin/` — macOS PostgreSQL binaries (`pg_ctl`, `initdb`, etc.)
+The setup wizard runs a **local** PostgreSQL instance on port `54329`. The installer must include PostgreSQL tools, or the user must have PostgreSQL installed.
 
-During development, the app falls back to system PostgreSQL (Homebrew on macOS) if bundled binaries are not present.
+### Option A — Bundle portable binaries (recommended for clients)
 
-## Package links
+Place binaries before `npm run dist:win` / `npm run dist:mac`:
 
-Symlink CRM packages for development:
+- `postgresql-win/bin/` — `pg_ctl.exe`, `initdb.exe`, `psql.exe`, and dependent DLLs
+- `postgresql-mac/bin/` — `pg_ctl`, `initdb`, `psql`, etc.
 
-```bash
-mkdir -p packages
-ln -sf "../../New-CRM 2/backend" packages/crm-backend
-ln -sf "../../New-CRM 2/frontend" packages/crm-frontend
-```
+Download Windows binaries: https://www.enterprisedb.com/download-postgresql-binaries (PostgreSQL 16 zip, extract `bin/` into `resources/postgresql-win/bin/`).
+
+### Option B — System PostgreSQL (development / IT-managed PCs)
+
+- **Windows:** Install PostgreSQL 16 from https://www.postgresql.org/download/windows/ (default path `C:\Program Files\PostgreSQL\16\`). Restart the app and run setup again.
+- **macOS:** `brew install postgresql@16`
+
+The app detects standard install paths and creates its own data directory under `%AppData%\insurecrm-desktop\postgresql\pgdata`.

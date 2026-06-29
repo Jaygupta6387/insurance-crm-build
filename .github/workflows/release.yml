@@ -56,6 +56,16 @@ jobs:
       - name: Build Electron app
         run: npm run build
 
+      - name: Bundle PostgreSQL (Windows)
+        if: matrix.platform == 'win'
+        run: node scripts/bundle-postgresql.mjs --platform win
+
+      - name: Bundle PostgreSQL (macOS)
+        if: matrix.platform == 'mac'
+        run: |
+          brew install postgresql@16
+          node scripts/bundle-postgresql.mjs --platform mac
+
       - name: Publish macOS release
         if: matrix.platform == 'mac'
         env:

@@ -8,6 +8,10 @@ dist/
 .env.*
 !.env.example
 
+.tmp-pg-download/
+resources/postgresql-win/
+resources/postgresql-mac/
+
 packages/crm-backend/node_modules/
 packages/crm-backend/logs/
 packages/crm-backend/.env
