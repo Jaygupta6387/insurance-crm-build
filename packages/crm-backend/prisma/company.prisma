@@ -1,0 +1,1152 @@
+// ─── Generator ────────────────────────────────────────────────────────────────
+// Generates a Prisma client for company-specific databases.
+// At runtime, this client is instantiated with a dynamic connection URL
+// resolved from the Super Admin DB company configuration.
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/company-client"
+}
+
+// ─── Datasource ───────────────────────────────────────────────────────────────
+// DATABASE_URL is used only for `prisma migrate deploy` and `prisma db push`.
+// At runtime the dynamic resolver overrides this per-company.
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ───────────────────────────────c─────────────────────────────────────
+enum Role {
+  ADMIN
+  EXECUTIVE
+}
+
+enum CustomerPriority {
+  LOW
+  MEDIUM
+  HIGH
+  VIP
+}
+
+enum CustomerStatus {
+  ACTIVE
+  INACTIVE
+  PROSPECT
+  BLOCKED
+}
+
+enum BloodGroup {
+  A_POSITIVE
+  A_NEGATIVE
+  B_POSITIVE
+  B_NEGATIVE
+  AB_POSITIVE
+  AB_NEGATIVE
+  O_POSITIVE
+  O_NEGATIVE
+  UNKNOWN
+}
+
+enum ReferredByType {
+  SUB_BROKER
+  CUSTOMER
+  SELF
+}
+
+enum SubBrokerStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum WalletTransactionType {
+  CREDIT
+  DEBIT
+}
+
+enum WalletTransactionReason {
+  COMMISSION_EARNED
+  MANUAL_CREDIT
+  MANUAL_DEBIT
+  PAYOUT
+  ADJUSTMENT
+}
+
+enum CommissionBasis {
+  PREMIUM_PERCENTAGE
+  COMMISSION_PERCENTAGE
+  FIXED_AMOUNT
+}
+
+enum CommissionComponentType {
+  OD
+  TP
+  ADDON
+  RSA
+  ZERO_DEP
+  PREMIUM
+  TOPUP
+  YEAR_1
+  RENEWAL
+  OTHER
+}
+
+enum CommissionStatus {
+  PENDING
+  PAID
+  CANCELLED
+}
+
+enum FamilyRelation {
+  SELF
+  SPOUSE
+  FATHER
+  MOTHER
+  SON
+  DAUGHTER
+  BROTHER
+  SISTER
+  OTHER
+}
+
+enum DocumentType {
+  PAN_CARD
+  AADHAR_CARD
+  PASSPORT
+  DRIVING_LICENSE
+  VOTER_ID
+  PHOTO
+  BANK_STATEMENT
+  CANCELLED_CHEQUE
+  SALARY_SLIP
+  OTHER
+}
+
+enum BankAccountType {
+  SAVINGS
+  CURRENT
+  SALARY
+  NRI
+  FIXED_DEPOSIT
+  OTHER
+}
+
+// ─── Users ────────────────────────────────────────────────────────────────────
+// Single table for both Admin and Executives.
+// There is exactly ONE ADMIN per company database.
+// The Admin user is pre-seeded by the Super Admin provisioning system.
+model User {
+  id                   String               @id @default(uuid())
+  full_name            String
+  email                String               @unique
+  password_hash        String
+  phone                String?
+  role                 Role                 @default(EXECUTIVE)
+  is_active            Boolean              @default(true)
+  is_blocked           Boolean              @default(false)
+  must_change_password Boolean              @default(true)
+  created_by           String?              // UUID of the Admin who created this user
+  last_login           DateTime?
+  created_at           DateTime             @default(now())
+  updated_at           DateTime             @updatedAt
+
+  permissions          ExecutivePermission?
+  reset_tokens         PasswordResetToken[]
+  audit_logs           AuditLog[]
+
+  // Customer relations
+  created_customers     Customer[]            @relation("CustomerCreator")
+  updated_customers     Customer[]            @relation("CustomerUpdater")
+  uploaded_documents    CustomerDocument[]    @relation("DocumentUploader")
+  created_bank_accounts CustomerBankAccount[] @relation("BankAccountCreator")
+  updated_bank_accounts CustomerBankAccount[] @relation("BankAccountUpdater")
+
+  @@map("users")
+}
+
+// ─── Executive Permissions ────────────────────────────────────────────────────
+// One row per EXECUTIVE. Admins have full access implicitly (no row needed).
+model ExecutivePermission {
+  id                   String   @id @default(uuid())
+  executive_id         String   @unique
+  executive            User     @relation(fields: [executive_id], references: [id], onDelete: Cascade)
+
+  // Customer
+  can_view_customers   Boolean  @default(false)
+  can_create_customer  Boolean  @default(false)
+  can_edit_customer    Boolean  @default(false)
+  can_delete_customer  Boolean  @default(false)
+
+  // Policy
+  can_create_policy             Boolean  @default(false)
+  can_edit_policy               Boolean  @default(false)
+  can_delete_policy             Boolean  @default(false)
+  can_manage_policy_commission  Boolean  @default(false)
+
+  // Claims
+  can_manage_claims    Boolean  @default(false)
+
+  // Employee management
+  can_create_employee  Boolean  @default(false)
+  can_edit_employee    Boolean  @default(false)
+  can_delete_employee  Boolean  @default(false)
+
+  // Sub-broker management
+  can_view_sub_brokers    Boolean  @default(false)
+  can_create_sub_brokers  Boolean  @default(false)
+  can_edit_sub_brokers    Boolean  @default(false)
+  can_delete_sub_brokers  Boolean  @default(false)
+  can_adjust_wallet       Boolean  @default(false)
+
+  // Motor Masters
+  can_view_motor_masters    Boolean  @default(false)
+  can_create_motor_masters  Boolean  @default(false)
+  can_edit_motor_masters    Boolean  @default(false)
+  can_delete_motor_masters  Boolean  @default(false)
+
+  // Reports
+  can_view_reports     Boolean  @default(false)
+
+  created_at           DateTime @default(now())
+  updated_at           DateTime @updatedAt
+
+  @@map("executive_permissions")
+}
+
+// ─── Password Reset Tokens ────────────────────────────────────────────────────
+// Stores SHA-256 hashed tokens. The raw token is sent via email.
+model PasswordResetToken {
+  id         String   @id @default(uuid())
+  user_id    String
+  user       User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  token      String   @unique // SHA-256 hash of the raw token
+  expires_at DateTime
+  used       Boolean  @default(false)
+  created_at DateTime @default(now())
+
+  @@map("password_reset_tokens")
+}
+
+// ─── Audit Logs ───────────────────────────────────────────────────────────────
+model AuditLog {
+  id          String   @id @default(uuid())
+  user_id     String?
+  user        User?    @relation(fields: [user_id], references: [id], onDelete: SetNull)
+  action      String   // e.g. LOGIN, LOGOUT, CREATE_EMPLOYEE, UPDATE_PERMISSION
+  entity_type String?  // e.g. USER, PERMISSION
+  entity_id   String?
+  metadata    Json?
+  ip_address  String?
+  created_at  DateTime @default(now())
+
+  @@map("audit_logs")
+}
+
+// ─── Sub Brokers ──────────────────────────────────────────────────────────────
+model SubBroker {
+  id             String          @id @default(uuid())
+  broker_code    String          @unique
+  full_name      String
+  phone          String
+  email          String?
+  status         SubBrokerStatus @default(ACTIVE)
+  wallet_balance Decimal         @default(0) @db.Decimal(15, 2)
+
+  created_by     String?
+  updated_by     String?
+  deleted_by     String?
+  deleted_at     DateTime?
+  created_at     DateTime        @default(now())
+  updated_at     DateTime        @updatedAt
+
+  customers             Customer[]                    @relation("SubBrokerReferrals")
+  wallet_transactions   SubBrokerWalletTransaction[]
+  commissions           PolicySubBrokerCommission[]
+
+  @@map("sub_brokers")
+}
+
+// ─── Sub Broker Wallet Ledger ─────────────────────────────────────────────────
+// Immutable ledger — records are never updated or deleted.
+model SubBrokerWalletTransaction {
+  id            String                  @id @default(uuid())
+  sub_broker_id String
+  sub_broker    SubBroker               @relation(fields: [sub_broker_id], references: [id], onDelete: Cascade)
+  type          WalletTransactionType
+  reason        WalletTransactionReason
+  amount        Decimal                 @db.Decimal(15, 2)
+  balance_after Decimal                 @db.Decimal(15, 2)
+  note          String?
+  reference_id  String?                 // legacy: commission_id or other entity reference
+  performed_by  String?                 // User id who made the adjustment
+
+  // Analytics FK references (nullable — only set for commission-originated transactions)
+  policy_id            String?
+  policy               Policy?           @relation("WalletTxPolicy", fields: [policy_id], references: [id], onDelete: SetNull)
+  customer_id          String?
+  customer             Customer?         @relation("CustomerWalletTxs", fields: [customer_id], references: [id], onDelete: SetNull)
+  lob_id               String?
+  lob                  Lob?              @relation(fields: [lob_id], references: [id], onDelete: SetNull)
+  product_id           String?
+  product              Product?          @relation(fields: [product_id], references: [id], onDelete: SetNull)
+  sub_product_id       String?
+  sub_product          SubProduct?       @relation(fields: [sub_product_id], references: [id], onDelete: SetNull)
+  insurance_company_id String?
+  insurance_company    InsuranceCompany? @relation(fields: [insurance_company_id], references: [id], onDelete: SetNull)
+
+  // Historical snapshots — preserved even if master names change later
+  customer_name_snapshot          String?
+  insurance_company_name_snapshot String?
+  product_name_snapshot           String?
+
+  created_at DateTime @default(now())
+
+  // Back-relation: the commission entry that triggered this wallet credit
+  commission PolicySubBrokerCommission? @relation("CommissionWalletTx")
+
+  @@index([sub_broker_id])
+  @@index([policy_id])
+  @@index([customer_id])
+  @@index([lob_id])
+  @@index([product_id])
+  @@index([insurance_company_id])
+  @@map("sub_broker_wallet_transactions")
+}
+
+// ─── Policy Sub Broker Commissions ───────────────────────────────────────────
+model PolicySubBrokerCommission {
+  id            String    @id @default(uuid())
+  sub_broker_id String
+  sub_broker    SubBroker @relation(fields: [sub_broker_id], references: [id], onDelete: Cascade)
+
+  // Core References
+  policy_id     String?
+  policy        Policy?   @relation("PolicyCommissions", fields: [policy_id], references: [id], onDelete: SetNull)
+  policy_number String?   // text fallback when no FK policy exists
+  customer_id   String?
+  customer      Customer? @relation("CustomerCommissions", fields: [customer_id], references: [id], onDelete: SetNull)
+
+  // Insurance Hierarchy
+  lob_id               String?
+  lob                  Lob?              @relation(fields: [lob_id], references: [id], onDelete: SetNull)
+  product_id           String?
+  product              Product?          @relation(fields: [product_id], references: [id], onDelete: SetNull)
+  sub_product_id       String?
+  sub_product          SubProduct?       @relation(fields: [sub_product_id], references: [id], onDelete: SetNull)
+  insurance_company_id String?
+  insurance_company    InsuranceCompany? @relation(fields: [insurance_company_id], references: [id], onDelete: SetNull)
+
+  // Commission Calculation
+  commission_basis        CommissionBasis?
+  total_commission_amount Decimal          @db.Decimal(15, 2)
+
+  // Wallet Tracking
+  is_wallet_credited    Boolean                    @default(false)
+  wallet_transaction_id String?                    @unique
+  wallet_transaction    SubBrokerWalletTransaction? @relation("CommissionWalletTx", fields: [wallet_transaction_id], references: [id], onDelete: SetNull)
+
+  // Metadata
+  status     CommissionStatus @default(PENDING)
+  notes      String?
+  created_by String?
+  created_at DateTime         @default(now())
+  updated_at DateTime         @updatedAt
+
+  items PolicySubBrokerCommissionItem[]
+
+  @@index([sub_broker_id])
+  @@index([policy_id])
+  @@index([customer_id])
+  @@index([lob_id])
+  @@index([product_id])
+  @@index([sub_product_id])
+  @@index([insurance_company_id])
+  @@index([created_at])
+  @@map("policy_sub_broker_commissions")
+}
+
+// ─── Commission Line Items ────────────────────────────────────────────────────
+model PolicySubBrokerCommissionItem {
+  id                String                    @id @default(uuid())
+  commission_id     String
+  commission        PolicySubBrokerCommission @relation(fields: [commission_id], references: [id], onDelete: Cascade)
+  component_type    CommissionComponentType
+  base_amount       Decimal?                  @db.Decimal(15, 2)
+  percentage        Decimal?                  @db.Decimal(5, 2)
+  commission_amount Decimal                   @db.Decimal(15, 2)
+  created_at        DateTime                  @default(now())
+
+  @@unique([commission_id, component_type])
+  @@map("policy_sub_broker_commission_items")
+}
+
+// ─── Customers ────────────────────────────────────────────────────────────────
+model Customer {
+  id               String           @id @default(uuid())
+  customer_code    String           @unique
+
+  // Family
+  family_code      String?
+  is_family_head   Boolean          @default(false)
+  family_relation  FamilyRelation?
+
+  // Basic Info
+  customer_name    String
+  customer_phone   String
+  customer_email   String?
+  customer_dob     DateTime?
+  age              Int?
+  customer_priority CustomerPriority @default(MEDIUM)
+  customer_since   Int?
+
+  // Health
+  height           Decimal?         @db.Decimal(5, 2)
+  weight           Decimal?         @db.Decimal(5, 2)
+  blood_group      BloodGroup?
+  has_ped          Boolean          @default(false)
+  ped_details      String?
+
+  // Address
+  house_no         String?
+  area             String?
+  city             String?
+  state            String?
+  country          String?          @default("India")
+  pincode          String?
+
+  // KYC
+  pan_card         String?
+  aadhar_card      String?
+
+  // Wallet (running balance; negative or pending tracked via ledger)
+  wallet_balance   Decimal          @default(0) @db.Decimal(15, 2)
+
+  // Referral
+  referred_by_type             ReferredByType?
+  referred_by_sub_broker_id    String?
+  referred_by_customer_id      String?
+
+  // Ownership
+  created_by       String
+  updated_by       String?
+
+  // Status
+  status           CustomerStatus   @default(ACTIVE)
+  is_active        Boolean          @default(true)
+  deleted_at       DateTime?
+
+  // Timestamps
+  created_at       DateTime         @default(now())
+  updated_at       DateTime         @updatedAt
+
+  // Relations — ownership
+  creator          User             @relation("CustomerCreator", fields: [created_by], references: [id])
+  updater          User?            @relation("CustomerUpdater", fields: [updated_by], references: [id])
+  referred_broker  SubBroker?       @relation("SubBrokerReferrals", fields: [referred_by_sub_broker_id], references: [id])
+
+  // Children
+  documents              CustomerDocument[]
+  bank_accounts          CustomerBankAccount[]
+  policies               Policy[]                     @relation("CustomerPolicies")
+  sub_broker_commissions PolicySubBrokerCommission[]  @relation("CustomerCommissions")
+  wallet_txs             SubBrokerWalletTransaction[] @relation("CustomerWalletTxs")
+  vehicles               Vehicle[]
+  customer_wallet_txs    CustomerWalletTransaction[]
+  health_policy_members  HealthPolicyMember[]         @relation("HealthPolicyMembers")
+
+  @@index([customer_phone])
+  @@index([family_code])
+  @@index([customer_code])
+  @@index([status])
+  @@index([pan_card])
+  @@map("customers")
+}
+
+// ─── Customer Documents ───────────────────────────────────────────────────────
+model CustomerDocument {
+  id            String       @id @default(uuid())
+  customer_id   String
+  customer      Customer     @relation(fields: [customer_id], references: [id], onDelete: Cascade)
+  document_type DocumentType
+  file_name     String
+  file_url      String
+  mime_type     String?
+  uploaded_by   String
+  uploader      User         @relation("DocumentUploader", fields: [uploaded_by], references: [id])
+  created_at    DateTime     @default(now())
+
+  @@map("customer_documents")
+}
+
+// ─── Customer Bank Accounts ───────────────────────────────────────────────────
+model CustomerBankAccount {
+  id                  String          @id @default(uuid())
+  customer_id         String
+  customer            Customer        @relation(fields: [customer_id], references: [id], onDelete: Cascade)
+
+  // Bank Details
+  account_holder_name String
+  account_number      String
+  ifsc_code           String
+  bank_name           String?
+  branch_name         String?
+  micr_code           String?
+  account_type        BankAccountType @default(SAVINGS)
+
+  // Status
+  is_primary          Boolean         @default(false)
+  is_verified         Boolean         @default(false)
+  is_active           Boolean         @default(true)
+
+  // Audit
+  created_by          String
+  updated_by          String?
+  creator             User            @relation("BankAccountCreator", fields: [created_by], references: [id])
+  updater             User?           @relation("BankAccountUpdater", fields: [updated_by], references: [id])
+
+  created_at          DateTime        @default(now())
+  updated_at          DateTime        @updatedAt
+
+  @@map("customer_bank_accounts")
+}
+
+// ─── Line of Business (LOB) ───────────────────────────────────────────────────
+model Lob {
+  id          String   @id @default(uuid())
+  name        String
+  is_active   Boolean  @default(true)
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+
+  products    Product[]
+  commissions PolicySubBrokerCommission[]
+  wallet_txs  SubBrokerWalletTransaction[]
+  policies    Policy[]
+  gst_rates   GstRate[]
+
+  @@map("lobs")
+}
+
+// ─── Product ──────────────────────────────────────────────────────────────────
+model Product {
+  id          String   @id @default(uuid())
+  lob_id      String
+  lob         Lob      @relation(fields: [lob_id], references: [id], onDelete: Restrict)
+  name        String
+  is_active   Boolean  @default(true)
+  created_by  String?
+  updated_by  String?
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+
+  sub_products  SubProduct[]
+  commissions   PolicySubBrokerCommission[]
+  wallet_txs    SubBrokerWalletTransaction[]
+  policies      Policy[]
+  premium_rates MotorPremiumRate[]
+  gst_rates     GstRate[]
+
+  @@index([lob_id])
+  @@map("products")
+}
+
+// ─── Sub Product ──────────────────────────────────────────────────────────────
+model SubProduct {
+  id          String   @id @default(uuid())
+  product_id  String
+  product     Product  @relation(fields: [product_id], references: [id], onDelete: Restrict)
+  name        String
+  is_active   Boolean  @default(true)
+  created_by  String?
+  updated_by  String?
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+
+  commissions   PolicySubBrokerCommission[]
+  wallet_txs    SubBrokerWalletTransaction[]
+  policies      Policy[]
+  premium_rates MotorPremiumRate[]
+
+  @@index([product_id])
+  @@map("sub_products")
+}
+
+// ─── Insurance Company ────────────────────────────────────────────────────────
+// Standalone — not dependent on any other entity
+model InsuranceCompany {
+  id          String   @id @default(uuid())
+  name        String
+  is_active   Boolean  @default(true)
+  created_by  String?
+  updated_by  String?
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+
+  commissions       PolicySubBrokerCommission[]
+  wallet_txs        SubBrokerWalletTransaction[]
+  policies          Policy[]
+  previous_policies PreviousPolicy[] @relation("PrevPolicyInsurer")
+  health_plans      HealthPlan[]
+
+  @@map("insurance_companies")
+}
+
+// ─── Motor Makes ──────────────────────────────────────────────────────────────
+model MotorMake {
+  id          String   @id @default(uuid())
+  make_name   String   @unique
+  is_active   Boolean  @default(true)
+  created_by  String?
+  updated_by  String?
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+
+  models      MotorModel[]
+  variants    MotorVariant[]
+  vehicles    Vehicle[]
+
+  @@index([make_name])
+  @@map("motor_makes")
+}
+
+// ─── Motor Models ─────────────────────────────────────────────────────────────
+model MotorModel {
+  id          String   @id @default(uuid())
+  make_id     String
+  make        MotorMake @relation(fields: [make_id], references: [id], onDelete: Cascade)
+  model_name  String
+  is_active   Boolean  @default(true)
+  created_by  String?
+  updated_by  String?
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+
+  variants    MotorVariant[]
+  vehicles    Vehicle[]
+
+  @@unique([make_id, model_name])
+  @@index([make_id])
+  @@index([model_name])
+  @@map("motor_models")
+}
+
+// ─── Motor Variants ───────────────────────────────────────────────────────────
+model MotorVariant {
+  id            String   @id @default(uuid())
+  make_id       String
+  make          MotorMake @relation(fields: [make_id], references: [id], onDelete: Cascade)
+  model_id      String
+  model         MotorModel @relation(fields: [model_id], references: [id], onDelete: Cascade)
+  variant_name  String
+  is_active     Boolean  @default(true)
+  created_by    String?
+  updated_by    String?
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
+
+  vehicles      Vehicle[]
+
+  @@unique([model_id, variant_name])
+  @@index([make_id])
+  @@index([model_id])
+  @@index([variant_name])
+  @@map("motor_variants")
+}
+
+// ─── RTO Codes ────────────────────────────────────────────────────────────────
+model RtoCode {
+  id          String   @id @default(uuid())
+  rto_code    String   @unique
+  rto_name    String
+  city        String
+  is_active   Boolean  @default(true)
+  created_by  String?
+  updated_by  String?
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+
+  vehicles    Vehicle[]
+
+  @@index([rto_code])
+  @@index([city])
+  @@map("rto_codes")
+}
+
+// ─── Add-On Coverages ─────────────────────────────────────────────────────────
+model AddOnCoverage {
+  id            String   @id @default(uuid())
+  add_on_name   String   @unique
+  is_active     Boolean  @default(true)
+  created_by    String?
+  updated_by    String?
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
+
+  policy_add_ons PolicyAddOn[]
+
+  @@index([add_on_name])
+  @@map("add_on_coverages")
+}
+
+// ─── Policy ───────────────────────────────────────────────────────────────────
+model Policy {
+  id                   String           @id @default(uuid())
+  policy_number        String?
+  customer_id          String
+  customer             Customer         @relation("CustomerPolicies", fields: [customer_id], references: [id], onDelete: Restrict)
+  lob_id               String?
+  lob                  Lob?             @relation(fields: [lob_id], references: [id], onDelete: SetNull)
+  product_id           String?
+  product              Product?         @relation(fields: [product_id], references: [id], onDelete: SetNull)
+  sub_product_id       String?
+  sub_product          SubProduct?      @relation(fields: [sub_product_id], references: [id], onDelete: SetNull)
+  insurance_company_id String?
+  insurance_company    InsuranceCompany? @relation(fields: [insurance_company_id], references: [id], onDelete: SetNull)
+
+  // Motor / general classification
+  policy_type_id       String?
+  policy_type          PolicyType?      @relation(fields: [policy_type_id], references: [id], onDelete: SetNull)
+  vehicle_id           String?
+  vehicle              Vehicle?         @relation(fields: [vehicle_id], references: [id], onDelete: SetNull)
+
+  // Source / referral (mirrors customer referral semantics)
+  referred_by_type             ReferredByType?
+  referred_by_sub_broker_id    String?
+  referred_by_customer_id      String?
+
+  premium_amount       Decimal?         @db.Decimal(15, 2)
+  sum_insured          Decimal?         @db.Decimal(15, 2)
+  start_date           DateTime?
+  end_date             DateTime?
+  issue_date           DateTime?
+  // DRAFT until a privileged user completes commission (step 5)
+  status               String           @default("DRAFT")
+  notes                String?
+  created_by           String?
+  updated_by           String?
+  created_at           DateTime         @default(now())
+  updated_at           DateTime         @updatedAt
+
+  commissions     PolicySubBrokerCommission[] @relation("PolicyCommissions")
+  wallet_txs      SubBrokerWalletTransaction[] @relation("WalletTxPolicy")
+  motor_detail    MotorPolicyDetail?
+  health_detail   HealthPolicyDetail?
+  health_members  HealthPolicyMember[]
+  add_ons         PolicyAddOn[]
+  documents       PolicyDocument[]
+  previous_policy PreviousPolicy?
+  our_commissions PolicyCommission[]
+  customer_wallet_txs CustomerWalletTransaction[]
+
+  @@index([customer_id])
+  @@index([lob_id])
+  @@index([insurance_company_id])
+  @@index([vehicle_id])
+  @@index([policy_number])
+  @@map("policies")
+}
+
+// ─── Lead Status ──────────────────────────────────────────────────────────────
+enum LeadStatus {
+  NEW
+  HOT
+  WARM
+  COLD
+  CONVERTED
+  LOST
+}
+
+// ─── Leads ────────────────────────────────────────────────────────────────────
+model Lead {
+  id                        String         @id @default(uuid())
+  lead_code                 String         @unique
+  lead_name                 String
+  phone_number              String
+  email                     String?
+  expected_premium          Decimal?       @db.Decimal(12, 2)
+  referred_by_type          ReferredByType @default(SELF)
+  referred_by_sub_broker_id String?
+  referred_by_customer_id   String?
+  lob_id                    String?
+  product_id                String?
+  sub_product_id            String?
+  assigned_to               String?
+  status                    LeadStatus     @default(NEW)
+  notes                     String?        @db.Text
+  is_active                 Boolean        @default(true)
+  deleted_at                DateTime?
+  created_by                String?
+  updated_by                String?
+  created_at                DateTime       @default(now())
+  updated_at                DateTime       @updatedAt
+
+  follow_ups LeadFollowUp[]
+  documents  LeadDocument[]
+
+  @@index([phone_number])
+  @@index([status])
+  @@index([assigned_to])
+  @@index([lob_id])
+  @@map("leads")
+}
+
+// ─── Lead Follow-ups ──────────────────────────────────────────────────────────
+model LeadFollowUp {
+  id             String    @id @default(uuid())
+  lead_id        String
+  notes          String?   @db.Text
+  follow_up_date DateTime?
+  is_done        Boolean   @default(false)
+  created_by     String?
+  created_at     DateTime  @default(now())
+
+  lead Lead @relation(fields: [lead_id], references: [id], onDelete: Cascade)
+
+  @@index([lead_id])
+  @@map("lead_follow_ups")
+}
+
+// ─── Lead Documents ───────────────────────────────────────────────────────────
+model LeadDocument {
+  id            String       @id @default(uuid())
+  lead_id       String
+  document_type DocumentType
+  file_name     String
+  file_url      String
+  created_by    String?
+  created_at    DateTime     @default(now())
+
+  lead Lead @relation(fields: [lead_id], references: [id], onDelete: Cascade)
+
+  @@index([lead_id])
+  @@map("lead_documents")
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MOTOR POLICY DOMAIN
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ─── Vehicles ─────────────────────────────────────────────────────────────────
+// A customer can own many vehicles; each vehicle can hold only one active policy.
+model Vehicle {
+  id                  String        @id @default(uuid())
+  customer_id         String
+  customer            Customer      @relation(fields: [customer_id], references: [id], onDelete: Cascade)
+
+  // "NOT APPLICABLE" when is_new_registration is true. Stored upper-cased.
+  registration_number String
+  is_new_registration Boolean       @default(false)
+
+  rto_code_id         String?
+  rto_code            RtoCode?      @relation(fields: [rto_code_id], references: [id], onDelete: SetNull)
+
+  chassis_last6       String?       // exactly 6 chars (validated)
+  make_id             String?
+  make                MotorMake?    @relation(fields: [make_id], references: [id], onDelete: SetNull)
+  model_id            String?
+  model               MotorModel?   @relation(fields: [model_id], references: [id], onDelete: SetNull)
+  variant_id          String?
+  variant             MotorVariant? @relation(fields: [variant_id], references: [id], onDelete: SetNull)
+
+  manufacture_year    Int?
+  registration_date   DateTime?
+  fuel_type           String?
+  cubic_capacity      Int?
+  battery_capacity    String?
+  seating_capacity    Int?
+
+  is_active           Boolean       @default(true)
+  deleted_at          DateTime?
+  created_by          String?
+  updated_by          String?
+  created_at          DateTime      @default(now())
+  updated_at          DateTime      @updatedAt
+
+  policies            Policy[]
+
+  @@index([customer_id])
+  @@index([registration_number])
+  @@map("vehicles")
+}
+
+// ─── Policy Types ─────────────────────────────────────────────────────────────
+// Seeded: New, Renew, Port, Used.
+model PolicyType {
+  id         String   @id @default(uuid())
+  name       String   @unique
+  is_active  Boolean  @default(true)
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  policies   Policy[]
+
+  @@map("policy_types")
+}
+
+// ─── Motor Premium Rates (IRDAI tariff master) ────────────────────────────────
+model MotorPremiumRate {
+  id              String      @id @default(uuid())
+  product_id      String?
+  product         Product?    @relation(fields: [product_id], references: [id], onDelete: SetNull)
+  sub_product_id  String?
+  sub_product     SubProduct? @relation(fields: [sub_product_id], references: [id], onDelete: SetNull)
+
+  zone            String      // A | B
+  cc_bracket      String      // lte1000 | 1000to1500 | gt1500
+  age_bracket     String      // lte5 | 5to10 | gt10
+  od_rate_percent Decimal     @db.Decimal(6, 3)
+  tp_premium      Decimal     @db.Decimal(12, 2)
+
+  is_active       Boolean     @default(true)
+  created_by      String?
+  updated_by      String?
+  created_at      DateTime    @default(now())
+  updated_at      DateTime    @updatedAt
+
+  @@index([product_id])
+  @@index([sub_product_id])
+  @@index([zone, cc_bracket, age_bracket])
+  @@map("motor_premium_rates")
+}
+
+// ─── GST Rates Master ─────────────────────────────────────────────────────────
+// Motor uses gst_on_od_percent + gst_on_tp_percent; other LOBs use gst_percent.
+model GstRate {
+  id                String   @id @default(uuid())
+  lob_id            String?
+  lob               Lob?     @relation(fields: [lob_id], references: [id], onDelete: SetNull)
+  product_id        String?
+  product           Product? @relation(fields: [product_id], references: [id], onDelete: SetNull)
+
+  gst_on_od_percent Decimal? @db.Decimal(5, 2)
+  gst_on_tp_percent Decimal? @db.Decimal(5, 2)
+  gst_percent       Decimal? @db.Decimal(5, 2)
+
+  is_active         Boolean  @default(true)
+  created_by        String?
+  updated_by        String?
+  created_at        DateTime @default(now())
+  updated_at        DateTime @updatedAt
+
+  @@index([lob_id])
+  @@index([product_id])
+  @@map("gst_rates")
+}
+
+// ─── Motor Policy Detail (1:1 with Policy) ────────────────────────────────────
+model MotorPolicyDetail {
+  id                         String    @id @default(uuid())
+  policy_id                  String    @unique
+  policy                     Policy    @relation(fields: [policy_id], references: [id], onDelete: Cascade)
+
+  package_type               String?
+  idv                        Decimal?  @db.Decimal(15, 2)
+  electric_accessory_idv     Decimal?  @db.Decimal(15, 2)
+  non_electric_accessory_idv Decimal?  @db.Decimal(15, 2)
+
+  // OD / TP cover windows (TP can be long-term for bundle plans)
+  od_start_date              DateTime?
+  od_end_date                DateTime?
+  tp_start_date              DateTime?
+  tp_end_date                DateTime?
+
+  // Premium computation
+  rate_source                String    @default("MANUAL") // DB | MANUAL
+  basic_premium              Decimal?  @db.Decimal(15, 2)
+  discount_percent           Decimal?  @db.Decimal(6, 3)
+  basic_after_discount       Decimal?  @db.Decimal(15, 2)
+  ncb_percent                Decimal?  @db.Decimal(6, 3)
+  od_premium                 Decimal?  @db.Decimal(15, 2)
+  tp_premium                 Decimal?  @db.Decimal(15, 2)
+  addon_premium              Decimal?  @db.Decimal(15, 2)
+  total_od_premium           Decimal?  @db.Decimal(15, 2)
+  net_premium                Decimal?  @db.Decimal(15, 2)
+  gst_on_od                  Decimal?  @db.Decimal(15, 2)
+  gst_on_tp                  Decimal?  @db.Decimal(15, 2)
+  total_gst                  Decimal?  @db.Decimal(15, 2)
+  total_premium              Decimal?  @db.Decimal(15, 2)
+
+  // Personal Accident cover (mandatory section)
+  pa_owner                   Boolean   @default(false)
+  pa_owner_amount            Decimal?  @db.Decimal(12, 2)
+  pa_passenger_1l            Boolean   @default(false)
+  pa_passenger_2l            Boolean   @default(false)
+  pa_passenger_amount        Decimal?  @db.Decimal(12, 2)
+  paid_driver                Boolean   @default(false)
+  paid_driver_amount         Decimal?  @db.Decimal(12, 2)
+
+  // Payment
+  payment_mode               String?
+  payment_reference          String?
+  is_full_payment            Boolean   @default(true)
+  amount_received            Decimal?  @db.Decimal(15, 2)
+
+  created_at                 DateTime  @default(now())
+  updated_at                 DateTime  @updatedAt
+
+  @@map("motor_policy_details")
+}
+
+// ─── Policy Add-ons (junction with amount) ────────────────────────────────────
+model PolicyAddOn {
+  id                 String         @id @default(uuid())
+  policy_id          String
+  policy             Policy         @relation(fields: [policy_id], references: [id], onDelete: Cascade)
+  add_on_coverage_id String?
+  add_on_coverage    AddOnCoverage? @relation(fields: [add_on_coverage_id], references: [id], onDelete: SetNull)
+  add_on_name        String         // snapshot
+  amount             Decimal?       @db.Decimal(12, 2)
+  created_at         DateTime       @default(now())
+
+  @@index([policy_id])
+  @@map("policy_add_ons")
+}
+
+// ─── Policy Documents (policy PDF + claim attachments) ────────────────────────
+model PolicyDocument {
+  id         String   @id @default(uuid())
+  policy_id  String
+  policy     Policy   @relation(fields: [policy_id], references: [id], onDelete: Cascade)
+  category   String   @default("POLICY_PDF") // POLICY_PDF | CLAIM | OTHER
+  file_name  String
+  file_url   String
+  mime_type  String?
+  created_by String?
+  created_at DateTime @default(now())
+
+  @@index([policy_id])
+  @@map("policy_documents")
+}
+
+// ─── Previous Policy / Claim History (1:1, step 4) ────────────────────────────
+model PreviousPolicy {
+  id                            String            @id @default(uuid())
+  policy_id                     String            @unique
+  policy                        Policy            @relation(fields: [policy_id], references: [id], onDelete: Cascade)
+  previous_policy_number        String?
+  previous_insurance_company_id String?
+  previous_insurance_company    InsuranceCompany? @relation("PrevPolicyInsurer", fields: [previous_insurance_company_id], references: [id], onDelete: SetNull)
+  claim_status                  String?           // No Claim | Claimed | Pending
+  claim_amount                  Decimal?          @db.Decimal(15, 2)
+  claim_description             String?           @db.Text
+  created_at                    DateTime          @default(now())
+  updated_at                    DateTime          @updatedAt
+
+  @@map("previous_policies")
+}
+
+// ─── Our (agency) Commission ──────────────────────────────────────────────────
+model PolicyCommission {
+  id                      String                 @id @default(uuid())
+  policy_id               String
+  policy                  Policy                 @relation(fields: [policy_id], references: [id], onDelete: Cascade)
+  total_commission_amount Decimal                @default(0) @db.Decimal(15, 2)
+  notes                   String?
+  created_by              String?
+  created_at              DateTime               @default(now())
+  updated_at              DateTime               @updatedAt
+
+  items                   PolicyCommissionItem[]
+
+  @@index([policy_id])
+  @@map("policy_commissions")
+}
+
+model PolicyCommissionItem {
+  id                String           @id @default(uuid())
+  commission_id     String
+  commission        PolicyCommission @relation(fields: [commission_id], references: [id], onDelete: Cascade)
+  component_type    String           // OD | TP | ADDON
+  base_amount       Decimal?         @db.Decimal(15, 2)
+  percentage        Decimal?         @db.Decimal(6, 3)
+  commission_amount Decimal          @db.Decimal(15, 2)
+  created_at        DateTime         @default(now())
+
+  @@unique([commission_id, component_type])
+  @@map("policy_commission_items")
+}
+
+// ─── Health Plan Master ───────────────────────────────────────────────────────
+model HealthPlan {
+  id                   String            @id @default(uuid())
+  name                 String
+  insurance_company_id String?
+  insurance_company    InsuranceCompany? @relation(fields: [insurance_company_id], references: [id], onDelete: SetNull)
+  is_active            Boolean           @default(true)
+  created_by           String?
+  updated_by           String?
+  created_at           DateTime          @default(now())
+  updated_at           DateTime          @updatedAt
+
+  policy_details       HealthPolicyDetail[]
+
+  @@index([name])
+  @@map("health_plans")
+}
+
+// ─── Health Policy Detail (1:1) ───────────────────────────────────────────────
+model HealthPolicyDetail {
+  id                String      @id @default(uuid())
+  policy_id         String      @unique
+  policy            Policy      @relation(fields: [policy_id], references: [id], onDelete: Cascade)
+  health_plan_id    String?
+  health_plan       HealthPlan? @relation(fields: [health_plan_id], references: [id], onDelete: SetNull)
+  deductible        Decimal?    @db.Decimal(15, 2)
+  sum_insured       Decimal?    @db.Decimal(15, 2)
+  cumulative_bonus  Decimal?    @db.Decimal(15, 2)
+  base_premium      Decimal?    @db.Decimal(15, 2)
+  gst_percent       Decimal?    @db.Decimal(5, 2)
+  gst_amount        Decimal?    @db.Decimal(15, 2)
+  net_premium       Decimal?    @db.Decimal(15, 2)
+  total_premium     Decimal?    @db.Decimal(15, 2)
+  payment_mode      String?
+  payment_reference String?
+  is_full_payment   Boolean     @default(true)
+  amount_received   Decimal?    @db.Decimal(15, 2)
+  created_at        DateTime    @default(now())
+  updated_at        DateTime    @updatedAt
+
+  @@map("health_policy_details")
+}
+
+// ─── Health Policy Members (covered lives) ────────────────────────────────────
+model HealthPolicyMember {
+  id            String          @id @default(uuid())
+  policy_id     String
+  policy        Policy          @relation(fields: [policy_id], references: [id], onDelete: Cascade)
+  customer_id   String?
+  customer      Customer?       @relation("HealthPolicyMembers", fields: [customer_id], references: [id], onDelete: SetNull)
+  relation      FamilyRelation?
+  member_name   String
+  member_phone  String?
+  member_email  String?
+  member_age    Int?
+  is_covered    Boolean         @default(true)
+  created_at    DateTime        @default(now())
+
+  @@index([policy_id])
+  @@index([customer_id])
+  @@map("health_policy_members")
+}
+
+// ─── Customer Wallet Ledger ───────────────────────────────────────────────────
+// Tracks pending balances from partial policy payments and settlements.
+model CustomerWalletTransaction {
+  id            String                @id @default(uuid())
+  customer_id   String
+  customer      Customer              @relation(fields: [customer_id], references: [id], onDelete: Cascade)
+  type          WalletTransactionType
+  amount        Decimal               @db.Decimal(15, 2)
+  balance_after Decimal               @db.Decimal(15, 2)
+  reason        String?               // POLICY_PENDING | PAYMENT_RECEIVED | ADJUSTMENT
+  policy_id     String?
+  policy        Policy?               @relation(fields: [policy_id], references: [id], onDelete: SetNull)
+  policy_number String?
+  product_name  String?
+  note          String?
+  performed_by  String?
+  created_at    DateTime              @default(now())
+
+  @@index([customer_id])
+  @@index([policy_id])
+  @@map("customer_wallet_transactions")
+}

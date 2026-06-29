@@ -1,0 +1,36 @@
+// ─── Generator ────────────────────────────────────────────────────────────────
+// Generates a Prisma client specifically for the Super Admin database.
+// The CRM backend uses this client ONLY to look up company DB configurations.
+// It never authenticates users from this DB.
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/superadmin-client"
+}
+
+// ─── Datasource ───────────────────────────────────────────────────────────────
+// Points to the already-provisioned Super Admin PostgreSQL database.
+datasource db {
+  provider = "postgresql"
+  url      = env("SUPER_ADMIN_DATABASE_URL")
+}
+
+// ─── Company Model ────────────────────────────────────────────────────────────
+// READ-ONLY from the CRM perspective.
+// Maps to the "admins" table in the Super Admin database.
+// Only includes the fields needed for DB resolution — unused columns are omitted
+// so Prisma doesn't attempt to map PostgreSQL user-defined / enum types.
+model Company {
+  id                    String    @id @default(cuid())
+  subdomain             String    @unique   // used as the "company_slug" identifier
+  database_name         String
+  database_host         String
+  database_port         Int       @default(5432)
+  database_user         String
+  database_password     String?             // Null for local peer auth; may be encrypted — see ENCRYPT_DB_CREDENTIALS
+  database_provisioned  Boolean   @default(false)
+  subscription_end      DateTime?           // null = never expires
+  is_active             Boolean   @default(true)
+  is_blocked            Boolean   @default(false)
+
+  @@map("admins")
+}

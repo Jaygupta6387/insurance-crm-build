@@ -1,0 +1,62 @@
+appId: com.insurecrm.desktop
+productName: InsureCRM Desktop
+copyright: Copyright © 2026 InsureCRM
+
+directories:
+  output: release
+  buildResources: resources
+
+files:
+  - out/**/*
+  - package.json
+
+extraResources:
+  - from: resources/
+    to: resources/
+    filter:
+      - "**/*"
+  - from: packages/crm-backend
+    to: crm-backend
+    filter:
+      - "**/*"
+      - "!logs/**"
+      - "!**/.env"
+      - "!**/.env.*"
+  - from: packages/crm-frontend/dist
+    to: crm-frontend/dist
+
+publish:
+  provider: github
+  owner: Jaygupta6387
+  repo: insurance-crm-build
+  releaseType: release
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: InsureCRM-Desktop-${version}-Setup.${ext}
+  publisherName: InsureCRM
+
+mac:
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+  artifactName: InsureCRM-Desktop-${version}-${arch}.${ext}
+  category: public.app-category.business
+  hardenedRuntime: false
+  gatekeeperAssess: false
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  perMachine: false
+
+dmg:
+  sign: false
+
+electronUpdaterCompatibility: ">=1.0.0"
