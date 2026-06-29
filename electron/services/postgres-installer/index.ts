@@ -108,6 +108,8 @@ const findMacPgBin = (bin: string): string | null => {
 const resolvePgBin = (bin: string): string | null => {
   const bundled = bundledPgBin(bin);
   if (bundled) return bundled;
+  // Packaged Windows builds must use bundled PostgreSQL (paths with spaces break cmd.exe).
+  if (app.isPackaged && process.platform === 'win32') return null;
   if (process.platform === 'win32') return findWindowsPgBin(bin);
   if (process.platform === 'darwin') return findMacPgBin(bin);
   return null;
@@ -156,6 +158,20 @@ const pgRuntimeEnv = (pgCtl: string, dataDir: string): NodeJS.ProcessEnv => {
     [pathKey]: `${pgBinDir}${pathSep}${pgRoot}${pathSep}${existingPath}`,
   };
 };
+
+/** Run PostgreSQL CLI tools without shell — required for paths with spaces on Windows. */
+const runPgSync = (
+  executable: string,
+  args: string[],
+  options: { env: NodeJS.ProcessEnv; cwd: string }
+) =>
+  spawnSync(executable, args, {
+    env: options.env,
+    cwd: options.cwd,
+    stdio: 'pipe',
+    encoding: 'utf8',
+    windowsHide: true,
+  });
 
 const isClusterInitialized = (dataDir: string): boolean =>
   existsSync(join(dataDir, 'PG_VERSION'));
@@ -213,12 +229,9 @@ const runInitdb = (
     ? ['-D', config.dataDir, '-U', config.user, '--auth-local=trust', '--auth-host=scram-sha-256', '-E', 'UTF8']
     : ['-D', config.dataDir, '-U', config.user, '-E', 'UTF8'];
 
-  const result = spawnSync(initdb, initArgs, {
+  const result = runPgSync(initdb, initArgs, {
     env: pgEnv,
-    stdio: 'pipe',
-    shell: process.platform === 'win32',
     cwd: dirname(pgCtl),
-    encoding: 'utf8',
   });
 
   if (result.status !== 0) {
@@ -247,12 +260,9 @@ const startPostgresServer = (
     'start',
   ];
 
-  const result = spawnSync(pgCtl, args, {
+  const result = runPgSync(pgCtl, args, {
     env: pgEnv,
-    stdio: 'pipe',
-    shell: process.platform === 'win32',
     cwd: dirname(pgCtl),
-    encoding: 'utf8',
   });
 
   if (result.status !== 0) {
@@ -307,10 +317,8 @@ const startDedicatedCluster = async (
 
   if (isClusterInitialized(config.dataDir)) {
     removeStalePidFile(config.dataDir, config.port);
-    const status = spawnSync(pgCtl, ['-D', config.dataDir, 'status'], {
+    const status = runPgSync(pgCtl, ['-D', config.dataDir, 'status'], {
       env: pgEnv,
-      encoding: 'utf8',
-      shell: process.platform === 'win32',
       cwd: dirname(pgCtl),
     });
     if (status.stdout?.includes('server is running')) {
@@ -365,7 +373,7 @@ export const installPostgres = async (
   if (!pgCtl || !initdb) {
     const help =
       process.platform === 'win32'
-        ? 'Install PostgreSQL 16 from https://www.postgresql.org/download/windows/ (use default options), then restart InsureCRM Desktop and run setup again.'
+        ? 'Bundled PostgreSQL is missing from this install. Reinstall InsureCRM Desktop v1.0.3+ from the latest release.'
         : 'Install PostgreSQL via Homebrew (`brew install postgresql@16`) or bundle binaries in resources/postgresql-mac/.';
     throw new Error(`PostgreSQL was not found on this computer. ${help}`);
   }

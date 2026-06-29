@@ -45,7 +45,9 @@ export const runMigrations = async (
   const backendPath = getCrmBackendPath();
   const databaseUrl = buildDatabaseUrl(config);
 
-  await execCommand('npx', ['prisma', 'migrate', 'deploy', '--schema=prisma/company.prisma'], {
+  await execCommand(
+    process.platform === 'win32' ? 'npx.cmd' : 'npx',
+    ['prisma', 'migrate', 'deploy', '--schema=prisma/company.prisma'], {
     cwd: backendPath,
     env: { ...process.env, DATABASE_URL: databaseUrl },
   }, onProgress);
@@ -83,7 +85,11 @@ const execCommand = (
 ): Promise<void> =>
   new Promise((resolve, reject) => {
     onProgress(`Running ${cmd} ${args.join(' ')}…`);
-    const child = spawn(cmd, args, { ...opts, shell: process.platform === 'win32' });
+    const child = spawn(cmd, args, {
+      ...opts,
+      shell: false,
+      windowsHide: true,
+    });
     child.stdout?.on('data', (d) => onProgress(String(d).trim()));
     child.stderr?.on('data', (d) => onProgress(String(d).trim()));
     child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`${cmd} exited ${code}`))));
