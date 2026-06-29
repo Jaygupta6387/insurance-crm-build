@@ -58,7 +58,7 @@ export default function SetupWizard({ onComplete }: Props) {
       <div className="card" style={{ maxWidth: 560 }}>
         <div className="logo">
           <h1>Setting Up InsureCRM</h1>
-          <p>First-time setup — this may take a few minutes</p>
+          <p>First-time setup — this may take a few minutes. Please keep the app open.</p>
         </div>
 
         <div className="progress-wrap">

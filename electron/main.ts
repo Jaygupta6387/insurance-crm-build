@@ -75,13 +75,15 @@ const launchCrm = async (store: ReturnType<typeof loadSecureStore>) => {
   }
 };
 
-app.whenReady().then(async () => {
+app.whenReady().then(() => {
   mainWindow = createWindow();
   initAutoUpdater(mainWindow);
 
-  const state = await bootstrapApp();
-  mainWindow.webContents.on('did-finish-load', () => {
-    mainWindow?.webContents.send('app:state', state);
+  // Never block the main process before the window is interactive.
+  mainWindow.webContents.once('did-finish-load', () => {
+    void bootstrapApp()
+      .then((state) => mainWindow?.webContents.send('app:state', state))
+      .catch(() => mainWindow?.webContents.send('app:state', 'activation'));
   });
 
   app.on('activate', () => {
