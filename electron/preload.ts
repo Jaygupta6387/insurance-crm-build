@@ -4,6 +4,7 @@ export interface DesktopApi {
   getStore: () => Promise<{ hasLicense: boolean; setupComplete: boolean; companyName?: string; adminEmail?: string }>;
   activateLicense: (licenseKey: string) => Promise<unknown>;
   runSetup: () => Promise<{ success: boolean; crmUrl: string }>;
+  resetPostgresData: () => Promise<void>;
   requestTransfer: (payload: { reason: string; new_device_name: string }) => Promise<unknown>;
   heartbeat: () => Promise<unknown>;
   openExternal: (url: string) => Promise<void>;
@@ -19,6 +20,7 @@ const api: DesktopApi = {
   getStore: () => ipcRenderer.invoke('store:get'),
   activateLicense: (licenseKey) => ipcRenderer.invoke('license:activate', licenseKey),
   runSetup: () => ipcRenderer.invoke('setup:run'),
+  resetPostgresData: () => ipcRenderer.invoke('setup:reset-postgres'),
   requestTransfer: (payload) => ipcRenderer.invoke('license:transfer', payload),
   heartbeat: () => ipcRenderer.invoke('license:heartbeat'),
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),

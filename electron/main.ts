@@ -6,6 +6,7 @@ import { activateLicense, heartbeatLicense, requestTransfer } from './services/l
 import {
   getDefaultPostgresConfig,
   installPostgres,
+  resetPostgresData,
 } from './services/postgres-installer';
 import { createDatabase, runMigrations, buildDatabaseUrl } from './services/db-bootstrap.service';
 import { startCrmServer, stopCrmServer, getCrmUrl } from './services/crm-server.service';
@@ -132,6 +133,10 @@ ipcMain.handle('license:activate', async (_e, licenseKey: string) => {
     const ax = err as { response?: { data?: { message?: string } }; message?: string };
     throw new Error(ax.response?.data?.message || ax.message || 'Activation failed');
   }
+});
+
+ipcMain.handle('setup:reset-postgres', () => {
+  resetPostgresData();
 });
 
 ipcMain.handle('setup:run', async () => {
