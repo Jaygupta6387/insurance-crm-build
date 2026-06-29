@@ -1,11 +1,11 @@
 import { randomBytes } from 'crypto';
 import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, rmSync, renameSync } from 'fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync, rmSync, renameSync } from 'fs';
 import { join, dirname } from 'path';
 import net from 'net';
 import { app } from 'electron';
-import { loadSecureStore } from '../secure-store.service';
+import { loadSecureStore, saveSecureStore } from '../secure-store.service';
 
 const execFileAsync = promisify(execFile);
 
@@ -23,23 +23,35 @@ const START_TIMEOUT_MS = 120_000;
 
 const getAppDataDir = () => join(app.getPath('userData'), 'postgresql');
 
-const randomPassword = () => randomBytes(16).toString('hex');
+export const generatePostgresPassword = () => randomBytes(16).toString('hex');
+
+/** Persist DB password once so retries/restarts use the same credentials as the cluster. */
+export const ensurePostgresCredentials = (): PostgresConfig => {
+  const store = loadSecureStore();
+  const password = store.dbPassword ?? generatePostgresPassword();
+  const user = store.dbUser ?? 'insurecrm';
+  const database = store.dbName ?? 'insurecrm_local';
+  const port = store.dbPort ?? PORT_CANDIDATES[0];
+
+  if (!store.dbPassword || !store.dbUser || !store.dbName) {
+    saveSecureStore({ ...store, dbPassword: password, dbUser: user, dbName: database, dbPort: port });
+  }
+
+  return {
+    host: '127.0.0.1',
+    port,
+    user,
+    password,
+    database,
+    dataDir: join(getAppDataDir(), 'pgdata'),
+  };
+};
 
 const yieldToEventLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-export const getDefaultPostgresConfig = (): PostgresConfig => {
-  const store = loadSecureStore();
-  return {
-    host: '127.0.0.1',
-    port: store.dbPort ?? PORT_CANDIDATES[0],
-    user: store.dbUser ?? 'insurecrm',
-    password: store.dbPassword ?? randomPassword(),
-    database: store.dbName ?? 'insurecrm_local',
-    dataDir: join(getAppDataDir(), 'pgdata'),
-  };
-};
+export const getDefaultPostgresConfig = (): PostgresConfig => ensurePostgresCredentials();
 
 const stopPostgresCluster = async (dataDir: string): Promise<void> => {
   const binName = process.platform === 'win32' ? 'pg_ctl.exe' : 'pg_ctl';
@@ -307,18 +319,119 @@ const runInitdb = async (
 ): Promise<void> => {
   mkdirSync(config.dataDir, { recursive: true });
   onProgress('Initializing local PostgreSQL data directory… (may take 1–2 min)');
-  const initArgs = process.platform === 'win32'
-    ? ['-D', config.dataDir, '-U', config.user, '--auth-local=trust', '--auth-host=scram-sha-256', '-E', 'UTF8']
-    : ['-D', config.dataDir, '-U', config.user, '-E', 'UTF8'];
 
-  const result = await runPgAsync(initdb, initArgs, {
-    env: pgEnv,
-    cwd: dirname(pgCtl),
+  const pwFile = join(getAppDataDir(), '.initdb-pw');
+  writeFileSync(pwFile, `${config.password}\n`, { encoding: 'utf8', mode: 0o600 });
+
+  const initArgs = [
+    '-D',
+    config.dataDir,
+    '-U',
+    config.user,
+    '--auth-local=trust',
+    '--auth-host=scram-sha-256',
+    '-E',
+    'UTF8',
+    '--pwfile',
+    pwFile,
+  ];
+
+  try {
+    const result = await runPgAsync(initdb, initArgs, {
+      env: pgEnv,
+      cwd: dirname(pgCtl),
+    });
+
+    if (result.status !== 0) {
+      const err = [result.stderr, result.stdout].filter(Boolean).join('\n');
+      throw new Error(err || 'initdb failed');
+    }
+  } finally {
+    try {
+      unlinkSync(pwFile);
+    } catch {
+      // ignore
+    }
+  }
+};
+
+const runPsqlCommand = async (
+  psql: string,
+  pgCtl: string,
+  config: PostgresConfig,
+  sql: string,
+  useTcp: boolean
+): Promise<{ stdout: string; stderr: string; status: number | null }> => {
+  const pgEnv = pgRuntimeEnv(pgCtl, config.dataDir);
+  const args = ['-U', config.user, '-d', 'postgres', '-v', 'ON_ERROR_STOP=1', '-c', sql];
+  if (useTcp) args.splice(0, 0, '-h', config.host, '-p', String(config.port));
+  return runPgAsync(psql, args, { env: pgEnv, cwd: dirname(psql) });
+};
+
+const withTemporaryTrustHost = async (
+  config: PostgresConfig,
+  pgCtl: string,
+  fn: () => Promise<void>
+): Promise<void> => {
+  const hbaPath = join(config.dataDir, 'pg_hba.conf');
+  if (!existsSync(hbaPath)) {
+    await fn();
+    return;
+  }
+
+  const original = readFileSync(hbaPath, 'utf8');
+  const trustRule = 'host    all             all             127.0.0.1/32            trust';
+  if (/host\s+all\s+all\s+127\.0\.0\.1\/32\s+trust/m.test(original)) {
+    await fn();
+    return;
+  }
+
+  const patched = original.replace(
+    /^host\s+all\s+all\s+127\.0\.0\.1\/32\s+\S+/m,
+    trustRule
+  );
+  if (patched === original) {
+    await fn();
+    return;
+  }
+
+  writeFileSync(hbaPath, patched, 'utf8');
+  const pgEnv = pgRuntimeEnv(pgCtl, config.dataDir);
+  await runPgAsync(pgCtl, ['-D', config.dataDir, 'reload'], { env: pgEnv, cwd: dirname(pgCtl) });
+  await sleep(500);
+
+  try {
+    await fn();
+  } finally {
+    writeFileSync(hbaPath, original, 'utf8');
+    await runPgAsync(pgCtl, ['-D', config.dataDir, 'reload'], { env: pgEnv, cwd: dirname(pgCtl) });
+  }
+};
+
+/** Set role password via trust auth (local socket / named pipe — no TCP password). */
+const syncPostgresRolePassword = async (
+  config: PostgresConfig,
+  pgCtl: string,
+  onProgress: (msg: string) => void
+): Promise<void> => {
+  const psqlName = process.platform === 'win32' ? 'psql.exe' : 'psql';
+  const psql = await resolvePgBin(psqlName);
+  if (!psql) throw new Error('psql not found');
+
+  onProgress('Configuring database credentials…');
+  const escaped = config.password.replace(/'/g, "''");
+  const sql = `ALTER USER "${config.user}" WITH PASSWORD '${escaped}'`;
+
+  let result = await runPsqlCommand(psql, pgCtl, config, sql, false);
+  if (result.status === 0) return;
+
+  await withTemporaryTrustHost(config, pgCtl, async () => {
+    result = await runPsqlCommand(psql, pgCtl, config, sql, true);
   });
 
   if (result.status !== 0) {
-    const err = [result.stderr, result.stdout].filter(Boolean).join('\n');
-    throw new Error(err || 'initdb failed');
+    const detail = [result.stderr, result.stdout].filter(Boolean).join('\n').trim();
+    throw new Error(detail || 'Could not set PostgreSQL user password');
   }
 };
 
@@ -441,6 +554,7 @@ const startDedicatedCluster = async (
     if (runningPort) {
       config.port = runningPort;
       onProgress(`PostgreSQL already running on port ${runningPort}`);
+      await syncPostgresRolePassword(config, pgCtl, onProgress);
       return;
     }
 
@@ -458,6 +572,7 @@ const startDedicatedCluster = async (
   try {
     await startPostgresServer(pgCtl, config, pgEnv, onProgress);
     await waitForPostgresReady(config, pgCtl, START_TIMEOUT_MS);
+    await syncPostgresRolePassword(config, pgCtl, onProgress);
     onProgress(`PostgreSQL started on port ${config.port}`);
   } catch (firstErr) {
     if (!allowReset) throw firstErr;
@@ -470,6 +585,7 @@ const startDedicatedCluster = async (
     await runInitdb(initdb, pgCtl, config, retryEnv, onProgress);
     await startPostgresServer(pgCtl, config, retryEnv, onProgress);
     await waitForPostgresReady(config, pgCtl, START_TIMEOUT_MS);
+    await syncPostgresRolePassword(config, pgCtl, onProgress);
     onProgress(`PostgreSQL started on port ${config.port} after reset`);
   }
 };
@@ -497,6 +613,8 @@ export const installPostgres = async (
   if (runningPort) {
     config.port = runningPort;
     onProgress(`PostgreSQL already running on port ${runningPort}`);
+    await syncPostgresRolePassword(config, pgCtl, onProgress);
+    saveSecureStore({ ...loadSecureStore(), dbPort: runningPort });
     return;
   }
 

@@ -17,12 +17,24 @@ export const createDatabase = async (
     database: 'postgres',
   });
 
-  await adminClient.connect();
+  try {
+    await adminClient.connect();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!/password authentication failed/i.test(message)) throw err;
+    throw new Error(
+      `${message}\n\nTry "Reset database & retry" in setup to recreate the local database with matching credentials.`
+    );
+  }
+
   try {
     const userCheck = await adminClient.query('SELECT 1 FROM pg_roles WHERE rolname = $1', [config.user]);
     if (userCheck.rowCount === 0) {
       onProgress('Creating database user…');
       await adminClient.query(`CREATE USER "${config.user}" WITH PASSWORD '${config.password.replace(/'/g, "''")}'`);
+    } else {
+      onProgress('Updating database user password…');
+      await adminClient.query(`ALTER USER "${config.user}" WITH PASSWORD '${config.password.replace(/'/g, "''")}'`);
     }
 
     const dbCheck = await adminClient.query('SELECT 1 FROM pg_database WHERE datname = $1', [config.database]);
