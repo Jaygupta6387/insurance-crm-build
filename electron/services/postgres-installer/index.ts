@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, rmSync, r
 import { join, dirname } from 'path';
 import net from 'net';
 import { app } from 'electron';
+import { loadSecureStore } from '../secure-store.service';
 
 const execFileAsync = promisify(execFile);
 
@@ -26,23 +27,60 @@ const randomPassword = () => randomBytes(16).toString('hex');
 
 const yieldToEventLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-export const getDefaultPostgresConfig = (): PostgresConfig => ({
-  host: '127.0.0.1',
-  port: PORT_CANDIDATES[0],
-  user: 'insurecrm',
-  password: randomPassword(),
-  database: 'insurecrm_local',
-  dataDir: join(getAppDataDir(), 'pgdata'),
-});
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-export const resetPostgresData = (): void => {
+export const getDefaultPostgresConfig = (): PostgresConfig => {
+  const store = loadSecureStore();
+  return {
+    host: '127.0.0.1',
+    port: store.dbPort ?? PORT_CANDIDATES[0],
+    user: store.dbUser ?? 'insurecrm',
+    password: store.dbPassword ?? randomPassword(),
+    database: store.dbName ?? 'insurecrm_local',
+    dataDir: join(getAppDataDir(), 'pgdata'),
+  };
+};
+
+const stopPostgresCluster = async (dataDir: string): Promise<void> => {
+  const binName = process.platform === 'win32' ? 'pg_ctl.exe' : 'pg_ctl';
+  const pgCtl = await resolvePgBin(binName);
+  if (!pgCtl || !isClusterInitialized(dataDir)) return;
+
+  const pgEnv = pgRuntimeEnv(pgCtl, dataDir);
+  await runPgAsync(pgCtl, ['-D', dataDir, 'stop', 'fast', '-m', 'fast'], {
+    env: pgEnv,
+    cwd: dirname(pgCtl),
+  });
+  await sleep(2000);
+};
+
+export const resetPostgresData = async (): Promise<void> => {
   const base = getAppDataDir();
-  if (!existsSync(base)) return;
+  const pgdata = join(base, 'pgdata');
+  if (!existsSync(pgdata)) return;
+
+  await stopPostgresCluster(pgdata);
+
   const stamp = Date.now();
+  const failedPath = join(base, `pgdata.failed.${stamp}`);
+
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      renameSync(pgdata, failedPath);
+      return;
+    } catch {
+      await stopPostgresCluster(pgdata);
+      await sleep(1000 * (attempt + 1));
+    }
+  }
+
   try {
-    renameSync(join(base, 'pgdata'), join(base, `pgdata.failed.${stamp}`));
-  } catch {
-    rmSync(join(base, 'pgdata'), { recursive: true, force: true });
+    rmSync(pgdata, { recursive: true, force: true, maxRetries: 5, retryDelay: 1000 });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `Could not remove local database folder (still in use). Close InsureCRM Desktop, end any postgres.exe in Task Manager, then retry.\n\n${message}`
+    );
   }
 };
 
@@ -156,7 +194,6 @@ const pgRuntimeEnv = (pgCtl: string, dataDir: string): NodeJS.ProcessEnv => {
   };
 };
 
-/** Async PostgreSQL CLI — never blocks the Electron main thread. */
 const runPgAsync = (
   executable: string,
   args: string[],
@@ -181,6 +218,53 @@ const runPgAsync = (
 const isClusterInitialized = (dataDir: string): boolean =>
   existsSync(join(dataDir, 'PG_VERSION'));
 
+/** Read the port this cluster was created for (postgresql.conf or postmaster.pid). */
+const readClusterPort = (dataDir: string): number | null => {
+  const pidFile = join(dataDir, 'postmaster.pid');
+  if (existsSync(pidFile)) {
+    try {
+      const lines = readFileSync(pidFile, 'utf8').split(/\r?\n/);
+      const fromPid = parseInt(lines[3]?.trim() ?? '', 10);
+      if (fromPid > 0) return fromPid;
+    } catch {
+      // fall through
+    }
+  }
+
+  const confPath = join(dataDir, 'postgresql.conf');
+  if (existsSync(confPath)) {
+    try {
+      const match = readFileSync(confPath, 'utf8').match(/^port\s*=\s*(\d+)/m);
+      if (match) return parseInt(match[1], 10);
+    } catch {
+      // fall through
+    }
+  }
+
+  return null;
+};
+
+const isOurClusterRunning = async (dataDir: string, pgCtl: string): Promise<number | null> => {
+  if (!isClusterInitialized(dataDir)) return null;
+
+  const pgEnv = pgRuntimeEnv(pgCtl, dataDir);
+  const status = await runPgAsync(pgCtl, ['-D', dataDir, 'status'], {
+    env: pgEnv,
+    cwd: dirname(pgCtl),
+  });
+
+  if (!status.stdout?.includes('server is running')) return null;
+
+  const clusterPort = readClusterPort(dataDir);
+  if (clusterPort && (await isPortListening(clusterPort))) return clusterPort;
+
+  for (const port of PORT_CANDIDATES) {
+    if (await isPortListening(port)) return port;
+  }
+
+  return clusterPort ?? PORT_CANDIDATES[0];
+};
+
 const readRecentLog = (dataDir: string): string => {
   const candidates = [
     join(dataDir, 'log'),
@@ -200,10 +284,13 @@ const readRecentLog = (dataDir: string): string => {
   return '';
 };
 
-const removeStalePidFile = async (dataDir: string, port: number): Promise<void> => {
+const removeStalePidFile = async (dataDir: string): Promise<void> => {
   const pidFile = join(dataDir, 'postmaster.pid');
   if (!existsSync(pidFile)) return;
-  if (await isPortListening(port)) return;
+
+  const clusterPort = readClusterPort(dataDir);
+  if (clusterPort && (await isPortListening(clusterPort))) return;
+
   try {
     unlinkSync(pidFile);
   } catch {
@@ -254,6 +341,12 @@ const startPostgresServer = async (
   });
 
   if (result.status !== 0) {
+    const runningPort = await isOurClusterRunning(config.dataDir, pgCtl);
+    if (runningPort) {
+      config.port = runningPort;
+      return;
+    }
+
     let logTail = readRecentLog(config.dataDir);
     if (!logTail) {
       try {
@@ -267,25 +360,24 @@ const startPostgresServer = async (
   }
 };
 
-const pickAvailablePort = async (onProgress: (msg: string) => void): Promise<number> => {
+const pickAvailablePort = async (): Promise<number> => {
   for (const port of PORT_CANDIDATES) {
-    if (!(await isPostgresRunning(port))) return port;
+    if (!(await isPortListening(port))) return port;
   }
-  onProgress('Default ports busy — using 54329 anyway');
   return PORT_CANDIDATES[0];
 };
 
 const buildStartFailureMessage = (port: number, dataDir: string, cause?: string): string => {
   const log = readRecentLog(dataDir);
   const tips = [
-    'Quit other PostgreSQL services or apps using the same port.',
+    'Click "Reset database & retry" (stops PostgreSQL first, then recreates the folder).',
+    'Close InsureCRM Desktop fully, end postgres.exe in Task Manager if needed, reopen and retry.',
     'Temporarily disable antivirus/firewall blocking local apps.',
-    'Click "Reset database & retry" in setup to recreate the local data folder.',
     'Restart your computer and run setup again.',
   ];
 
   const parts = [
-    `PostgreSQL did not start on port ${port} within ${START_TIMEOUT_MS / 1000}s.`,
+    `PostgreSQL did not become ready on port ${port} within ${START_TIMEOUT_MS / 1000}s.`,
     cause ? `Details: ${cause}` : null,
     log ? `Log:\n${log}` : null,
     `Try:\n${tips.map((t, i) => `${i + 1}. ${t}`).join('\n')}`,
@@ -294,14 +386,45 @@ const buildStartFailureMessage = (port: number, dataDir: string, cause?: string)
   return parts.join('\n\n');
 };
 
-const waitForPort = async (port: number, timeoutMs: number): Promise<void> => {
+/** Wait for Postgres on config.port or any candidate port (fixes 54329 vs 54330 mismatch). */
+const waitForPostgresReady = async (config: PostgresConfig, pgCtl: string, timeoutMs: number): Promise<void> => {
+  const preferred = [config.port, readClusterPort(config.dataDir), ...PORT_CANDIDATES]
+    .filter((p): p is number => typeof p === 'number' && p > 0);
+  const ports = [...new Set(preferred)];
+
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    if (await isPostgresRunning(port)) return;
+    for (const port of ports) {
+      if (!(await isPortListening(port))) continue;
+      const running = await isOurClusterRunning(config.dataDir, pgCtl);
+      if (running || !isClusterInitialized(config.dataDir)) {
+        config.port = port;
+        return;
+      }
+    }
     await yieldToEventLoop();
-    await new Promise((r) => setTimeout(r, 500));
+    await sleep(500);
   }
-  throw new Error(`port ${port} not accepting connections`);
+
+  throw new Error(`PostgreSQL not ready on ports: ${ports.join(', ')}`);
+};
+
+const removeDataDirSafely = async (dataDir: string, pgCtl: string, onProgress: (msg: string) => void): Promise<void> => {
+  onProgress('Stopping PostgreSQL and cleaning up old data folder…');
+  await stopPostgresCluster(dataDir);
+  await sleep(1000);
+
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      rmSync(dataDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 });
+      return;
+    } catch {
+      await stopPostgresCluster(dataDir);
+      await sleep(1000 * (attempt + 1));
+    }
+  }
+
+  throw new Error('Could not remove old database folder — close the app, end postgres.exe in Task Manager, then retry.');
 };
 
 const startDedicatedCluster = async (
@@ -314,18 +437,18 @@ const startDedicatedCluster = async (
   const pgEnv = pgRuntimeEnv(pgCtl, config.dataDir);
 
   if (isClusterInitialized(config.dataDir)) {
-    await removeStalePidFile(config.dataDir, config.port);
-    const status = await runPgAsync(pgCtl, ['-D', config.dataDir, 'status'], {
-      env: pgEnv,
-      cwd: dirname(pgCtl),
-    });
-    if (status.stdout?.includes('server is running')) {
-      onProgress('PostgreSQL cluster already running');
+    const runningPort = await isOurClusterRunning(config.dataDir, pgCtl);
+    if (runningPort) {
+      config.port = runningPort;
+      onProgress(`PostgreSQL already running on port ${runningPort}`);
       return;
     }
+
+    await removeStalePidFile(config.dataDir);
+    const clusterPort = readClusterPort(config.dataDir);
+    if (clusterPort) config.port = clusterPort;
   } else if (existsSync(config.dataDir)) {
-    onProgress('Removing incomplete database folder…');
-    rmSync(config.dataDir, { recursive: true, force: true });
+    await removeDataDirSafely(config.dataDir, pgCtl, onProgress);
   }
 
   if (!isClusterInitialized(config.dataDir)) {
@@ -334,19 +457,20 @@ const startDedicatedCluster = async (
 
   try {
     await startPostgresServer(pgCtl, config, pgEnv, onProgress);
-    await waitForPort(config.port, START_TIMEOUT_MS);
-    onProgress('PostgreSQL started');
+    await waitForPostgresReady(config, pgCtl, START_TIMEOUT_MS);
+    onProgress(`PostgreSQL started on port ${config.port}`);
   } catch (firstErr) {
     if (!allowReset) throw firstErr;
 
-    onProgress('Startup failed — resetting local database and retrying once…');
-    resetPostgresData();
+    onProgress('Startup failed — stopping PostgreSQL and retrying with a fresh database…');
+    await resetPostgresData();
     config.dataDir = join(getAppDataDir(), 'pgdata');
+    config.port = await pickAvailablePort();
     const retryEnv = pgRuntimeEnv(pgCtl, config.dataDir);
     await runInitdb(initdb, pgCtl, config, retryEnv, onProgress);
     await startPostgresServer(pgCtl, config, retryEnv, onProgress);
-    await waitForPort(config.port, START_TIMEOUT_MS);
-    onProgress('PostgreSQL started after reset');
+    await waitForPostgresReady(config, pgCtl, START_TIMEOUT_MS);
+    onProgress(`PostgreSQL started on port ${config.port} after reset`);
   }
 };
 
@@ -355,13 +479,6 @@ export const installPostgres = async (
   onProgress: (msg: string) => void
 ): Promise<void> => {
   onProgress('Detecting PostgreSQL…');
-
-  config.port = await pickAvailablePort(onProgress);
-
-  if (await isPostgresRunning(config.port)) {
-    onProgress(`PostgreSQL already running on port ${config.port}`);
-    return;
-  }
 
   const binName = process.platform === 'win32' ? 'pg_ctl.exe' : 'pg_ctl';
   const initName = process.platform === 'win32' ? 'initdb.exe' : 'initdb';
@@ -376,8 +493,18 @@ export const installPostgres = async (
     throw new Error(`PostgreSQL was not found on this computer. ${help}`);
   }
 
+  const runningPort = await isOurClusterRunning(config.dataDir, pgCtl);
+  if (runningPort) {
+    config.port = runningPort;
+    onProgress(`PostgreSQL already running on port ${runningPort}`);
+    return;
+  }
+
+  const savedPort = readClusterPort(config.dataDir);
+  config.port = savedPort ?? (await pickAvailablePort());
+
   const source = bundledPgBin(binName) ? 'bundled' : 'system';
-  onProgress(`Using ${source} PostgreSQL tools on port ${config.port}…`);
+  onProgress(`Using ${source} PostgreSQL on port ${config.port}…`);
 
   try {
     await startDedicatedCluster(config, pgCtl, initdb, onProgress, true);

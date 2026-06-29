@@ -137,8 +137,8 @@ ipcMain.handle('license:activate', async (_e, licenseKey: string) => {
   }
 });
 
-ipcMain.handle('setup:reset-postgres', () => {
-  resetPostgresData();
+ipcMain.handle('setup:reset-postgres', async () => {
+  await resetPostgresData();
 });
 
 ipcMain.handle('setup:run', async () => {
