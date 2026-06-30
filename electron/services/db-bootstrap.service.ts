@@ -79,6 +79,26 @@ export const runMigrations = async (
   if (result.stdout.trim()) onProgress(result.stdout.trim());
   if (result.stderr.trim()) onProgress(result.stderr.trim());
 
+  onProgress('Seeding default master data…');
+  const seedClient = new Client({ connectionString: databaseUrl });
+  await seedClient.connect();
+  try {
+    await seedClient.query(`
+      INSERT INTO "policy_types" ("id", "name", "is_active", "created_at", "updated_at")
+      SELECT gen_random_uuid()::text, name, true, NOW(), NOW()
+      FROM (VALUES ('New'), ('Renew'), ('Port'), ('Used')) AS t(name)
+      ON CONFLICT ("name") DO NOTHING;
+    `);
+    await seedClient.query(`
+      INSERT INTO "lobs" ("id", "name", "is_active", "created_at", "updated_at")
+      SELECT gen_random_uuid()::text, name, true, NOW(), NOW()
+      FROM (VALUES ('MOTOR'), ('HEALTH'), ('LIFE'), ('SME')) AS t(name)
+      WHERE NOT EXISTS (SELECT 1 FROM "lobs" LIMIT 1);
+    `);
+  } finally {
+    await seedClient.end();
+  }
+
   onProgress('Migrations complete');
 };
 

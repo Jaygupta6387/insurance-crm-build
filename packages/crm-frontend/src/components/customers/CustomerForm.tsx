@@ -82,9 +82,27 @@ const step3Schema = z.object({
   pincode: z.string().regex(/^\d{6}$/, 'Must be 6 digits').optional().or(z.literal('')),
 });
 
+const optionalPanField = z.preprocess(
+  (val) => {
+    if (val === undefined || val === null) return undefined;
+    const trimmed = String(val).trim();
+    return trimmed === '' ? undefined : trimmed.toUpperCase();
+  },
+  z.string().regex(/^[A-Z]{5}[0-9]{4}[A-Z]$/, 'Invalid PAN (e.g. ABCDE1234F)').optional()
+);
+
+const optionalAadharField = z.preprocess(
+  (val) => {
+    if (val === undefined || val === null) return undefined;
+    const trimmed = String(val).trim();
+    return trimmed === '' ? undefined : trimmed;
+  },
+  z.string().regex(/^\d{12}$/, 'Aadhar must be 12 digits').optional()
+);
+
 const step4Schema = z.object({
-  pan_card: z.string().regex(/^[A-Z]{5}[0-9]{4}[A-Z]$/, 'Invalid PAN (e.g. ABCDE1234F)').optional().or(z.literal('')),
-  aadhar_card: z.string().regex(/^\d{12}$/, 'Aadhar must be 12 digits').optional().or(z.literal('')),
+  pan_card: optionalPanField,
+  aadhar_card: optionalAadharField,
 });
 
 const STEPS = [
@@ -101,6 +119,47 @@ const nativeSel = [
   'flex h-10 w-full rounded-xl border border-border/70 bg-background/80 px-3 py-1 text-sm shadow-sm',
   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 transition-all duration-200',
 ].join(' ');
+
+// ── Date input (native picker works reliably in Electron) ─────────────────────
+function DateInput({
+  value,
+  onChange,
+  onBlur,
+  name,
+  inputRef,
+  max,
+}: {
+  value?: string;
+  onChange: (value: string) => void;
+  onBlur?: () => void;
+  name?: string;
+  inputRef?: React.Ref<HTMLInputElement>;
+  max?: string;
+}) {
+  const openPicker = (el: HTMLInputElement) => {
+    if (typeof el.showPicker === 'function') {
+      try { el.showPicker(); } catch { /* unsupported */ }
+    }
+  };
+
+  return (
+    <input
+      ref={inputRef}
+      type="date"
+      name={name}
+      value={value || ''}
+      max={max}
+      onChange={(e) => onChange(e.target.value)}
+      onBlur={onBlur}
+      onClick={(e) => openPicker(e.currentTarget)}
+      onFocus={(e) => openPicker(e.currentTarget)}
+      className={cn(
+        nativeSel,
+        'cursor-pointer [&::-webkit-calendar-picker-indicator]:cursor-pointer [&::-webkit-calendar-picker-indicator]:opacity-100',
+      )}
+    />
+  );
+}
 
 // ── Year picker ───────────────────────────────────────────────────────────────
 function YearPicker({ value, onChange }: { value?: string; onChange: (v: string) => void }) {
@@ -514,11 +573,17 @@ function Step1({ form, employees: _employees, brokers }: { form: any; employees:
               <Input {...register('customer_email')} type="email" placeholder="jay@example.com" className={cn(inputCls, 'pl-9')} />
             </div>
           </Field>
-          <Field label="Date of Birth">
-            <div className="relative">
-              <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
-              <Input {...register('customer_dob')} type="date" className={cn(inputCls, 'pl-9')} />
-            </div>
+          <Field label="Date of Birth" hint="Optional">
+            <Controller name="customer_dob" control={control} render={({ field }) => (
+              <DateInput
+                inputRef={field.ref}
+                name={field.name}
+                value={field.value}
+                onChange={field.onChange}
+                onBlur={field.onBlur}
+                max={new Date().toISOString().split('T')[0]}
+              />
+            )} />
           </Field>
           <Field label="Priority Level">
             <Controller name="customer_priority" control={control} render={({ field }) => (
@@ -867,16 +932,27 @@ interface Step4Props {
   onDocAdd: () => void; onDocRemove: (id: string) => void;
 }
 function Step4({ form, bankAccount, documents, onBankChange, onDocChange, onDocAdd, onDocRemove }: Step4Props) {
-  const { register, formState: { errors } } = form;
+  const { register, control, formState: { errors } } = form;
   return (
     <div className="space-y-7">
       <div className="space-y-4">
         <Divider icon={CreditCard} label="Identity Numbers" />
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <Field label="PAN Card" hint="e.g. ABCDE1234F" error={errors.pan_card?.message as string | undefined}>
+          <Field label="PAN Card" hint="Optional — e.g. ABCDE1234F" error={errors.pan_card?.message as string | undefined}>
             <div className="relative">
               <CreditCard className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
-              <Input {...register('pan_card')} placeholder="ABCDE1234F" className={cn(inputCls, 'pl-9 uppercase font-mono tracking-widest')} maxLength={10} />
+              <Controller name="pan_card" control={control} render={({ field }) => (
+                <Input
+                  value={field.value || ''}
+                  onChange={(e) => field.onChange(e.target.value.toUpperCase())}
+                  onBlur={field.onBlur}
+                  name={field.name}
+                  ref={field.ref}
+                  placeholder="ABCDE1234F"
+                  className={cn(inputCls, 'pl-9 uppercase font-mono tracking-widest')}
+                  maxLength={10}
+                />
+              )} />
             </div>
           </Field>
           <Field label="Aadhar Card" hint="12-digit number" error={errors.aadhar_card?.message as string | undefined}>

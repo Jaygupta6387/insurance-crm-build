@@ -3,12 +3,22 @@ const { resolveCompanyDb } = require('../dynamic-db/dbResolver');
 // ─── LOBs ─────────────────────────────────────────────────────────────────────
 
 const DEFAULT_LOBS = ['MOTOR', 'HEALTH', 'LIFE', 'SME'];
+const DEFAULT_POLICY_TYPES = ['New', 'Renew', 'Port', 'Used'];
 
 const ensureDefaultLobs = async (db) => {
   const count = await db.lob.count();
   if (count > 0) return;
   for (const name of DEFAULT_LOBS) {
     await db.lob.create({ data: { name, is_active: true } });
+  }
+};
+
+const ensureDefaultPolicyTypes = async (db) => {
+  for (const name of DEFAULT_POLICY_TYPES) {
+    const existing = await db.policyType.findUnique({ where: { name } });
+    if (!existing) {
+      await db.policyType.create({ data: { name, is_active: true } });
+    }
   }
 };
 
@@ -180,6 +190,7 @@ const deleteInsuranceCompany = async (id, companySlug) => {
 
 const getPolicyTypes = async (companySlug, filters = {}) => {
   const db = await resolveCompanyDb(companySlug);
+  await ensureDefaultPolicyTypes(db);
   const where = {};
   if (filters.is_active !== undefined) where.is_active = filters.is_active === 'true' || filters.is_active === true;
   return db.policyType.findMany({ where, orderBy: { name: 'asc' } });
@@ -490,4 +501,5 @@ module.exports = {
   createHealthPlan,
   updateHealthPlan,
   deleteHealthPlan,
+  ensureDefaultPolicyTypes,
 };

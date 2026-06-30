@@ -189,7 +189,7 @@ const createCustomer = async (data, creatorId, companySlug) => {
       state: data.state || null,
       country: data.country || 'India',
       pincode: data.pincode || null,
-      pan_card: data.pan_card || null,
+      pan_card: data.pan_card ? String(data.pan_card).trim().toUpperCase() : null,
       aadhar_card: data.aadhar_card || null,
       referred_by_type: data.referred_by_type || null,
       referred_by_sub_broker_id: data.referred_by_sub_broker_id || null,

@@ -9,6 +9,24 @@ const FamilyRelation = z.enum(['SELF', 'SPOUSE', 'FATHER', 'MOTHER', 'SON', 'DAU
 const phoneRegex = /^[6-9]\d{9}$/;
 const panRegex = /^[A-Z]{5}[0-9]{4}[A-Z]{1}$/;
 const aadharRegex = /^\d{12}$/;
+
+const optionalPan = z.preprocess(
+  (val) => {
+    if (val === undefined || val === null) return undefined;
+    const trimmed = String(val).trim();
+    return trimmed === '' ? undefined : trimmed.toUpperCase();
+  },
+  z.string().regex(panRegex, 'Invalid PAN format (e.g. ABCDE1234F)').optional()
+);
+
+const optionalAadhar = z.preprocess(
+  (val) => {
+    if (val === undefined || val === null) return undefined;
+    const trimmed = String(val).trim();
+    return trimmed === '' ? undefined : trimmed;
+  },
+  z.string().regex(aadharRegex, 'Aadhar must be 12 digits').optional()
+);
 const ifscRegex = /^[A-Z]{4}0[A-Z0-9]{6}$/;
 
 const createCustomerSchema = z.object({
@@ -41,8 +59,8 @@ const createCustomerSchema = z.object({
   pincode: z.string().regex(/^\d{6}$/, 'Pincode must be 6 digits').optional().or(z.literal('')).transform(v => v || undefined),
 
   // KYC
-  pan_card: z.string().regex(panRegex, 'Invalid PAN format (e.g. ABCDE1234F)').optional().or(z.literal('')).transform(v => v?.toUpperCase() || undefined),
-  aadhar_card: z.string().regex(aadharRegex, 'Aadhar must be 12 digits').optional().or(z.literal('')).transform(v => v || undefined),
+  pan_card: optionalPan,
+  aadhar_card: optionalAadhar,
 
   // Referral
   referred_by_type: ReferredByType.optional(),

@@ -1,5 +1,6 @@
 const { resolveCompanyDb } = require('../dynamic-db/dbResolver');
 const { audit } = require('../audit/auditService');
+const { ensureDefaultPolicyTypes } = require('../masterdata/masterdata.service');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -227,6 +228,7 @@ const getPolicy = async (id, companySlug) => {
 
 const getPolicyTypes = async (companySlug) => {
   const db = await resolveCompanyDb(companySlug);
+  await ensureDefaultPolicyTypes(db);
   return db.policyType.findMany({ where: { is_active: true }, orderBy: { name: 'asc' } });
 };
 
