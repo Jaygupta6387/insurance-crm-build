@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { createContext, useContext, useState, useCallback } from 'react';
+import { createContext, useContext, useState, useCallback, useMemo } from 'react';
 import {
   ToastProvider,
   ToastViewport,
@@ -51,11 +51,14 @@ export function ToastContextProvider({ children }: { children: React.ReactNode }
     []
   );
 
-  const toast: ToastContextValue = {
-    success: (title, description) => addToast({ title, description, variant: 'success' }),
-    error: (title, description) => addToast({ title, description, variant: 'destructive' }),
-    info: (title, description) => addToast({ title, description }),
-  };
+  const toast = useMemo<ToastContextValue>(
+    () => ({
+      success: (title, description) => addToast({ title, description, variant: 'success' }),
+      error: (title, description) => addToast({ title, description, variant: 'destructive' }),
+      info: (title, description) => addToast({ title, description }),
+    }),
+    [addToast]
+  );
 
   return (
     <ToastContext.Provider value={toast}>

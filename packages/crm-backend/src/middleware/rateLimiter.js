@@ -1,13 +1,15 @@
 const rateLimit = require('express-rate-limit');
-const { rateLimit: rateLimitConfig, isDev } = require('../config/env');
+const { rateLimit: rateLimitConfig, isDev, crmMode } = require('../config/env');
 
-/** General rate limiter applied to all routes (disabled in development). */
+const isDesktopMode = () => crmMode === 'desktop';
+
+/** General rate limiter — disabled for local desktop (single user on 127.0.0.1). */
 const generalLimiter = rateLimit({
   windowMs: rateLimitConfig.windowMs,
-  max: rateLimitConfig.max,
+  max: isDesktopMode() ? 10_000 : rateLimitConfig.max,
   standardHeaders: true,
   legacyHeaders: false,
-  skip: () => isDev,
+  skip: () => isDev || isDesktopMode(),
   message: {
     success: false,
     message: 'Too many requests — please try again later.',
@@ -17,9 +19,10 @@ const generalLimiter = rateLimit({
 /** Stricter limiter for authentication endpoints (login, forgot-password). */
 const authLimiter = rateLimit({
   windowMs: rateLimitConfig.windowMs,
-  max: rateLimitConfig.authMax,
+  max: isDesktopMode() ? 200 : rateLimitConfig.authMax,
   standardHeaders: true,
   legacyHeaders: false,
+  skip: () => isDev,
   message: {
     success: false,
     message: 'Too many authentication attempts — please try again in 15 minutes.',

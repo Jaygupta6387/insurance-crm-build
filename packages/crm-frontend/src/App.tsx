@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useParams } from 'react-router-dom';
 import { ThemeProvider } from '@/components/common/ThemeProvider';
@@ -45,17 +45,20 @@ function SessionRestorer({ children }: { children: ReactNode }) {
   const setLoading = useAuthStore((s) => s.setLoading);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const { company_slug } = useParams();
+  const restoreAttempted = useRef(false);
 
   useEffect(() => {
     if (!company_slug) {
       setLoading(false);
       return;
     }
-    // Already authenticated (e.g. just logged in) — no need to refresh
     if (isAuthenticated) {
       setLoading(false);
       return;
     }
+    if (restoreAttempted.current) return;
+    restoreAttempted.current = true;
+
     authService
       .refresh()
       .then((res) => {

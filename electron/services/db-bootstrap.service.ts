@@ -87,16 +87,20 @@ export const seedAdminUser = async (
   adminEmail: string,
   adminPasswordHash: string,
   adminName: string,
-  onProgress: (msg: string) => void
+  onProgress: (msg: string) => void,
+  options?: { overwritePassword?: boolean }
 ): Promise<void> => {
   onProgress('Seeding admin user…');
   const client = new Client({ connectionString: buildDatabaseUrl(config) });
   await client.connect();
   try {
+    const conflictClause = options?.overwritePassword
+      ? `ON CONFLICT ("email") DO UPDATE SET "password_hash" = EXCLUDED."password_hash", "full_name" = EXCLUDED."full_name", "updated_at" = NOW()`
+      : `ON CONFLICT ("email") DO NOTHING`;
     await client.query(`
       INSERT INTO "users" ("id", "full_name", "email", "password_hash", "role", "is_active", "must_change_password", "created_at", "updated_at")
       VALUES (gen_random_uuid()::text, $1, $2, $3, 'ADMIN', true, true, NOW(), NOW())
-      ON CONFLICT ("email") DO UPDATE SET "password_hash" = EXCLUDED."password_hash", "updated_at" = NOW()
+      ${conflictClause}
     `, [adminName, adminEmail, adminPasswordHash]);
   } finally {
     await client.end();

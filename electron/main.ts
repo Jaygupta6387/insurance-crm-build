@@ -88,22 +88,6 @@ const ensureLicenseMetadata = async () => {
   return loadSecureStore();
 };
 
-const ensureAdminSeeded = async (store: ReturnType<typeof loadSecureStore>) => {
-  if (!store.adminEmail || !store.adminPasswordHash) return;
-  try {
-    const config = await ensurePostgresRunning();
-    await seedAdminUser(
-      config,
-      store.adminEmail,
-      store.adminPasswordHash,
-      store.adminName || store.companyName || 'Admin',
-      () => {}
-    );
-  } catch (err) {
-    console.warn('[setup] admin seed skipped:', err instanceof Error ? err.message : err);
-  }
-};
-
 const navigateMainWindowTo = async (url: string): Promise<void> => {
   if (!mainWindow) throw new Error('Application window is not ready');
 
@@ -289,7 +273,8 @@ ipcMain.handle('setup:run', async () => {
           creds.adminEmail,
           creds.adminPasswordHash,
           creds.adminName || creds.companyName || 'Admin',
-          onProgress
+          onProgress,
+          { overwritePassword: true }
         );
       },
     },
@@ -332,9 +317,7 @@ ipcMain.handle('setup:run', async () => {
 });
 
 ipcMain.handle('crm:open', async () => {
-  let store = await ensureLicenseMetadata();
-  await ensureAdminSeeded(store);
-  store = loadSecureStore();
+  const store = await ensureLicenseMetadata();
   const url = await launchCrm(store);
   void heartbeatLicenseWithRetry(store.licenseToken!, store.machineHash || '').catch((err) => {
     console.warn('[license] heartbeat after open:', err.message);
