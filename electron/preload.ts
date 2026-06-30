@@ -10,6 +10,7 @@ export interface DesktopApi {
   heartbeat: () => Promise<unknown>;
   openExternal: (url: string) => Promise<void>;
   clearStore: () => Promise<void>;
+  resetForNewLicense: () => Promise<{ success: boolean }>;
   onAppState: (cb: (state: string) => void) => () => void;
   onSetupProgress: (cb: (data: Record<string, unknown>) => void) => () => void;
   onUpdateStatus: (cb: (data: { status: string; version?: string; percent?: number; message?: string }) => void) => () => void;
@@ -27,6 +28,7 @@ const api: DesktopApi = {
   heartbeat: () => ipcRenderer.invoke('license:heartbeat'),
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
   clearStore: () => ipcRenderer.invoke('store:clear'),
+  resetForNewLicense: () => ipcRenderer.invoke('store:reset-for-new-license'),
   onAppState: (cb) => {
     const handler = (_: unknown, state: string) => cb(state);
     ipcRenderer.on('app:state', handler);

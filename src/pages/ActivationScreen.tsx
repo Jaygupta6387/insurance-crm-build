@@ -48,6 +48,9 @@ export default function ActivationScreen({ onActivated }: Props) {
         <button type="button" className="btn btn-primary" onClick={handleActivate} disabled={loading || key.length < 19}>
           {loading ? 'Activating…' : 'Activate License'}
         </button>
+        <p style={{ color: '#64748b', fontSize: 13, marginTop: 16, textAlign: 'center' }}>
+          Switching company? Enter the new license key above — the app removes the previous local database automatically.
+        </p>
       </div>
     </div>
   );

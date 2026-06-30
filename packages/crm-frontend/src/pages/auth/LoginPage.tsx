@@ -4,7 +4,7 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { motion } from 'framer-motion';
-import { Eye, EyeOff, LogIn, Building2, Loader2 } from 'lucide-react';
+import { Eye, EyeOff, LogIn, Building2, Loader2, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -25,6 +25,8 @@ export default function LoginPage() {
   const { setAuth } = useAuthStore();
   const [showPassword, setShowPassword] = useState(false);
   const [loginError, setLoginError] = useState('');
+  const [resetting, setResetting] = useState(false);
+  const canSwitchLicense = typeof window.desktop?.resetForNewLicense === 'function';
 
   const {
     register,
@@ -56,6 +58,25 @@ export default function LoginPage() {
       const message = err.response?.data?.message || 'Login failed. Please try again.';
       setLoginError(message);
       toast.error('Login failed', message);
+    }
+  };
+
+  const handleSwitchLicense = async () => {
+    if (!window.desktop?.resetForNewLicense) return;
+    const ok = window.confirm(
+      'Remove this company\'s local database and license from this PC?\n\nYou can then enter a different license key and set up again.'
+    );
+    if (!ok) return;
+    setResetting(true);
+    setLoginError('');
+    try {
+      await window.desktop.resetForNewLicense();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Could not reset local data';
+      setLoginError(msg);
+      toast.error('Reset failed', msg);
+    } finally {
+      setResetting(false);
     }
   };
 
@@ -155,7 +176,7 @@ export default function LoginPage() {
               <Button
                 type="submit"
                 className="w-full bg-white text-slate-900 hover:bg-white/90"
-                disabled={isSubmitting}
+                disabled={isSubmitting || resetting}
               >
                 {isSubmitting ? (
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -164,6 +185,23 @@ export default function LoginPage() {
                 )}
                 {isSubmitting ? 'Signing in…' : 'Sign in'}
               </Button>
+
+              {canSwitchLicense && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="w-full border-white/15 bg-transparent text-white/70 hover:bg-white/5 hover:text-white"
+                  disabled={isSubmitting || resetting}
+                  onClick={() => void handleSwitchLicense()}
+                >
+                  {resetting ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <RotateCcw className="mr-2 h-4 w-4" />
+                  )}
+                  {resetting ? 'Resetting…' : 'Use a different license / reset local database'}
+                </Button>
+              )}
             </form>
           </CardContent>
         </Card>

@@ -44,6 +44,17 @@ export default function CrmLauncher() {
               <button type="button" className="btn btn-primary" disabled={retrying} onClick={() => void launch()}>
                 {retrying ? 'Starting…' : 'Retry'}
               </button>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={retrying}
+                onClick={() => {
+                  if (!window.confirm('Remove local database and license so you can activate a different company?')) return;
+                  void window.desktop.resetForNewLicense?.();
+                }}
+              >
+                Switch license / reset data
+              </button>
             </div>
           </div>
         )}

@@ -17,6 +17,23 @@ import { initAutoUpdater, installUpdate, checkForUpdates } from './services/upda
 
 let mainWindow: BrowserWindow | null = null;
 
+const normalizeLicenseKey = (key: string): string => key.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+
+const reloadShellUI = (): void => {
+  if (!mainWindow) return;
+  if (process.env.ELECTRON_RENDERER_URL) {
+    void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
+  } else {
+    void mainWindow.loadFile(join(__dirname, '../renderer/index.html'));
+  }
+};
+
+const resetLocalInstallation = async (): Promise<void> => {
+  stopCrmServer();
+  await resetPostgresData();
+  clearSecureStore();
+};
+
 const createWindow = (): BrowserWindow => {
   const win = new BrowserWindow({
     width: 1280,
@@ -206,6 +223,14 @@ ipcMain.handle('store:get', () => {
 
 ipcMain.handle('license:activate', async (_e, licenseKey: string) => {
   try {
+    const incoming = normalizeLicenseKey(licenseKey);
+    const store = loadSecureStore();
+    const previous = store.licenseKey ? normalizeLicenseKey(store.licenseKey) : '';
+
+    if (previous && previous !== incoming) {
+      await resetLocalInstallation();
+    }
+
     const fp = await collectFingerprint();
     const result = await activateLicense(licenseKey, fp);
     saveSecureStore({
@@ -342,4 +367,13 @@ ipcMain.handle('app:openExternal', (_e, url: string) => shell.openExternal(url))
 ipcMain.handle('store:clear', () => {
   clearSecureStore();
   stopCrmServer();
+});
+
+ipcMain.handle('store:reset-for-new-license', async () => {
+  await resetLocalInstallation();
+  reloadShellUI();
+  mainWindow?.webContents.once('did-finish-load', () => {
+    mainWindow?.webContents.send('app:state', 'activation');
+  });
+  return { success: true };
 });
