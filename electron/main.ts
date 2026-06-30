@@ -63,11 +63,11 @@ const launchCrm = async (store: ReturnType<typeof loadSecureStore>) => {
     DESKTOP_COMPANY_SLUG: store.subdomain || 'local',
     JWT_ACCESS_SECRET: process.env.JWT_ACCESS_SECRET || 'desktop-access-secret-min-32-chars!!',
     JWT_REFRESH_SECRET: process.env.JWT_REFRESH_SECRET || 'desktop-refresh-secret-min-32-chars!',
-    MAIL_FROM_ADDRESS: 'noreply@insurecrm.local',
+    MAIL_FROM_ADDRESS: 'noreply@example.com',
     SMTP_HOST: 'localhost',
     SMTP_USER: 'local',
     SMTP_PASS: 'local',
-    FRONTEND_RESET_PASSWORD_URL: 'http://localhost/reset',
+    FRONTEND_RESET_PASSWORD_URL: 'http://127.0.0.1/reset',
   });
 
   if (mainWindow) {
@@ -166,16 +166,18 @@ ipcMain.handle('setup:run', async () => {
       run: async (onProgress) => {
         onProgress('Starting CRM server…');
         const dbUrl = buildDatabaseUrl(config);
-        saveSecureStore({
+        const partialStore = {
           ...loadSecureStore(),
           databaseUrl: dbUrl,
           dbUser: config.user,
           dbPassword: config.password,
           dbName: config.database,
           dbPort: config.port,
-          setupComplete: true,
-        });
-        await launchCrm(loadSecureStore());
+          setupComplete: false,
+        };
+        saveSecureStore(partialStore);
+        await launchCrm(partialStore);
+        saveSecureStore({ ...loadSecureStore(), setupComplete: true });
         onProgress('Ready');
       },
     },

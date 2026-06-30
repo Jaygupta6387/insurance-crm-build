@@ -1,5 +1,6 @@
 require('dotenv').config();
 
+const path = require('path');
 const express = require('express');
 const helmet = require('helmet');
 const cors = require('cors');
@@ -72,6 +73,15 @@ app.get('/api-docs.json', (req, res) => res.json(swaggerSpec));
 // ─── API Routes ───────────────────────────────────────────────────────────────
 app.use('/api', routes);
 
+// ─── Desktop SPA (bundled frontend) ───────────────────────────────────────────
+if (isDesktopMode() && process.env.DESKTOP_FRONTEND_DIST) {
+  const dist = process.env.DESKTOP_FRONTEND_DIST;
+  app.use(express.static(dist));
+  app.get(/^\/(?!api).*/, (_req, res) => {
+    res.sendFile(path.join(dist, 'index.html'));
+  });
+}
+
 // ─── Centralised Error Handler ────────────────────────────────────────────────
 app.use(errorHandler);
 
@@ -101,7 +111,8 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 const start = async () => {
   try {
     await connectDb();
-    const server = app.listen(port, () => {
+    const host = isDesktopMode() ? '127.0.0.1' : undefined;
+    const server = app.listen(port, host, () => {
       logger.info(`🚀  CRM Server running on port ${port}`);
       logger.info(`📚  Swagger docs: http://localhost:${port}/api-docs`);
       logger.info(`🌐  API base: http://localhost:${port}/api`);
