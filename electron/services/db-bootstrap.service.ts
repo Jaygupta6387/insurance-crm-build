@@ -1,8 +1,10 @@
 import { Client } from 'pg';
-import { spawn } from 'child_process';
+import { existsSync } from 'fs';
+import { join } from 'path';
 import type { PostgresConfig } from './postgres-installer/index';
 import { buildDatabaseUrl } from './postgres-installer/index';
 import { getCrmBackendPath } from './app-paths.service';
+import { runNodeScript } from './process-spawn.service';
 
 export const createDatabase = async (
   config: PostgresConfig,
@@ -53,16 +55,29 @@ export const runMigrations = async (
   config: PostgresConfig,
   onProgress: (msg: string) => void
 ): Promise<void> => {
-  onProgress('Running Prisma migrations…');
+  onProgress('Running Prisma schema sync…');
   const backendPath = getCrmBackendPath();
   const databaseUrl = buildDatabaseUrl(config);
+  const prismaCli = join(backendPath, 'node_modules', 'prisma', 'build', 'index.js');
 
-  await execCommand(
-    process.platform === 'win32' ? 'npx.cmd' : 'npx',
-    ['prisma', 'migrate', 'deploy', '--schema=prisma/company.prisma'], {
-    cwd: backendPath,
-    env: { ...process.env, DATABASE_URL: databaseUrl },
-  }, onProgress);
+  if (!existsSync(prismaCli)) {
+    throw new Error(
+      'Prisma is missing from this install. Download the latest InsureCRM Desktop installer and try again.'
+    );
+  }
+
+  const result = await runNodeScript(
+    prismaCli,
+    ['db', 'push', '--schema=prisma/company.prisma', '--skip-generate'],
+    {
+      cwd: backendPath,
+      env: { DATABASE_URL: databaseUrl },
+      label: 'Prisma',
+    }
+  );
+
+  if (result.stdout.trim()) onProgress(result.stdout.trim());
+  if (result.stderr.trim()) onProgress(result.stderr.trim());
 
   onProgress('Migrations complete');
 };
@@ -88,23 +103,5 @@ export const seedAdminUser = async (
   }
   onProgress('Admin user ready');
 };
-
-const execCommand = (
-  cmd: string,
-  args: string[],
-  opts: { cwd: string; env: NodeJS.ProcessEnv },
-  onProgress: (msg: string) => void
-): Promise<void> =>
-  new Promise((resolve, reject) => {
-    onProgress(`Running ${cmd} ${args.join(' ')}…`);
-    const child = spawn(cmd, args, {
-      ...opts,
-      shell: false,
-      windowsHide: true,
-    });
-    child.stdout?.on('data', (d) => onProgress(String(d).trim()));
-    child.stderr?.on('data', (d) => onProgress(String(d).trim()));
-    child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`${cmd} exited ${code}`))));
-  });
 
 export { buildDatabaseUrl };

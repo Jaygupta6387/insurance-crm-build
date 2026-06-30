@@ -1,6 +1,7 @@
 import { spawn, ChildProcess } from 'child_process';
 import { join } from 'path';
 import { getCrmBackendPath, getCrmFrontendDistPath } from './app-paths.service';
+import { getNodeExecutable, nodeRuntimeEnv } from './process-spawn.service';
 import getPort from './get-port';
 
 let crmProcess: ChildProcess | null = null;
@@ -13,21 +14,23 @@ export const startCrmServer = async (env: Record<string, string>): Promise<numbe
   const backendPath = getCrmBackendPath();
   const entry = join(backendPath, 'src/server.js');
 
-  crmProcess = spawn('node', [entry], {
+  crmProcess = spawn(getNodeExecutable(), [entry], {
     cwd: backendPath,
-    env: {
-      ...process.env,
+    env: nodeRuntimeEnv({
       ...env,
       CRM_MODE: 'desktop',
       PORT: String(crmPort),
       NODE_ENV: 'production',
       FRONTEND_URL: `http://127.0.0.1:${crmPort}`,
-    },
+    }),
     stdio: ['ignore', 'pipe', 'pipe'],
+    shell: false,
+    windowsHide: true,
   });
 
   crmProcess.stdout?.on('data', (d) => console.log('[CRM]', String(d)));
   crmProcess.stderr?.on('data', (d) => console.error('[CRM]', String(d)));
+  crmProcess.on('error', (err) => console.error('[CRM] spawn error', err));
   crmProcess.on('exit', () => { crmProcess = null; });
 
   await waitForServer(crmPort);

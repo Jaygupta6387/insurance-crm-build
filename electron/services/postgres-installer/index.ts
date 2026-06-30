@@ -6,6 +6,7 @@ import { join, dirname } from 'path';
 import net from 'net';
 import { app } from 'electron';
 import { loadSecureStore, saveSecureStore } from '../secure-store.service';
+import { sanitizeProcessEnv } from '../env-utils';
 
 const execFileAsync = promisify(execFile);
 
@@ -199,11 +200,11 @@ const pgRuntimeEnv = (pgCtl: string, dataDir: string): NodeJS.ProcessEnv => {
   const pathKey = process.platform === 'win32' ? 'Path' : 'PATH';
   const pathSep = process.platform === 'win32' ? ';' : ':';
   const existingPath = process.env[pathKey] || '';
-  return {
+  return sanitizeProcessEnv({
     ...process.env,
     PGDATA: dataDir,
     [pathKey]: `${pgBinDir}${pathSep}${pgRoot}${pathSep}${existingPath}`,
-  };
+  });
 };
 
 const runPgAsync = (
@@ -212,10 +213,16 @@ const runPgAsync = (
   options: { env: NodeJS.ProcessEnv; cwd: string }
 ): Promise<{ stdout: string; stderr: string; status: number | null }> =>
   new Promise((resolve, reject) => {
-    const child = spawn(executable, args, {
-      env: options.env,
+    if (!executable?.trim()) {
+      reject(new Error('PostgreSQL executable not found'));
+      return;
+    }
+
+    const child = spawn(executable, args.map((arg) => String(arg)), {
+      env: sanitizeProcessEnv(options.env),
       cwd: options.cwd,
       stdio: 'pipe',
+      shell: false,
       windowsHide: true,
     });
 
@@ -223,7 +230,7 @@ const runPgAsync = (
     let stderr = '';
     child.stdout?.on('data', (chunk) => { stdout += chunk.toString(); });
     child.stderr?.on('data', (chunk) => { stderr += chunk.toString(); });
-    child.on('error', reject);
+    child.on('error', (err) => reject(new Error(`${executable} failed: ${err.message}`)));
     child.on('close', (status) => resolve({ stdout, stderr, status }));
   });
 
