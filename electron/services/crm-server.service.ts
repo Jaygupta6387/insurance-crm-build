@@ -1,12 +1,15 @@
-import { fork, ChildProcess } from 'child_process';
-import { existsSync, mkdirSync } from 'fs';
+import { spawn, ChildProcess } from 'child_process';
+import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
-import { app } from 'electron';
+import { app, utilityProcess } from 'electron';
+import type { UtilityProcess } from 'electron';
 import { getCrmBackendPath, getCrmFrontendDistPath } from './app-paths.service';
-import { nodeRuntimeEnv } from './process-spawn.service';
+import { crmChildEnv, getNodeExecutable } from './process-spawn.service';
 import getPort from './get-port';
 
-let crmProcess: ChildProcess | null = null;
+type CrmChild = UtilityProcess | ChildProcess;
+
+let crmProcess: CrmChild | null = null;
 let crmPort = 0;
 let lastCrmOutput = '';
 
@@ -20,92 +23,153 @@ const getCrmLogDir = (): string => {
   return dir;
 };
 
-const tailOutput = (text: string, maxLines = 16): string =>
+const persistCrmLog = (output: string): string => {
+  const dir = getCrmLogDir();
+  const file = join(dir, 'last-startup.log');
+  try {
+    writeFileSync(file, output, 'utf8');
+    return file;
+  } catch {
+    return file;
+  }
+};
+
+const tailOutput = (text: string, maxLines = 40): string =>
   text.split(/\r?\n/).filter(Boolean).slice(-maxLines).join('\n').trim();
 
+const isUtilityProcess = (child: CrmChild): child is UtilityProcess =>
+  typeof (child as UtilityProcess).pid !== 'undefined' && 'stdout' in child;
+
+const killCrmChild = (child: CrmChild): void => {
+  try {
+    child.kill();
+  } catch {
+    // ignore
+  }
+};
+
 export const startCrmServer = async (env: Record<string, string>): Promise<number> => {
-  if (crmProcess && !crmProcess.killed && crmPort > 0) {
+  if (crmProcess && crmPort > 0) {
     try {
       const res = await fetch(`http://127.0.0.1:${crmPort}/api/health`);
       if (res.ok) return crmPort;
     } catch {
-      // stale process — restart below
+      // stale — restart
     }
     stopCrmServer();
   }
 
   crmPort = await getPort();
   const backendPath = getCrmBackendPath();
+  const bootstrap = join(backendPath, 'crm-bootstrap.cjs');
   const entry = join(backendPath, 'src/server.js');
   const frontendDist = getCrmFrontendDistPath();
-  const logDir = getCrmLogDir();
+  const logDir = join(getCrmLogDir(), 'runtime');
+  mkdirSync(logDir, { recursive: true });
 
-  if (!existsSync(entry)) {
-    throw new Error(`CRM backend not found: ${entry}`);
+  if (!existsSync(bootstrap) && !existsSync(entry)) {
+    throw new Error(`CRM backend not found: ${backendPath}`);
   }
   if (!existsSync(join(frontendDist, 'index.html'))) {
     throw new Error(`CRM frontend not found: ${join(frontendDist, 'index.html')}`);
+  }
+  if (!existsSync(join(backendPath, 'node_modules', 'express'))) {
+    throw new Error(
+      `CRM dependencies missing from install (${join(backendPath, 'node_modules')}). Reinstall InsureCRM Desktop.`
+    );
   }
 
   lastCrmOutput = '';
   let exited = false;
   let exitCode: number | null = null;
 
-  const childEnv = nodeRuntimeEnv({
+  const childEnv = crmChildEnv({
     ...env,
     CRM_MODE: 'desktop',
     PORT: String(crmPort),
     NODE_ENV: 'production',
     FRONTEND_URL: `http://127.0.0.1:${crmPort}`,
     DATABASE_URL: env.DESKTOP_DATABASE_URL || env.DATABASE_URL || '',
+    DESKTOP_DATABASE_URL: env.DESKTOP_DATABASE_URL || env.DATABASE_URL || '',
     CRM_LOG_DIR: logDir,
     DESKTOP_FRONTEND_DIST: frontendDist,
     LICENSE_CLOUD_API_URL: env.LICENSE_CLOUD_API_URL || CLOUD_LICENSE_API,
+    ELECTRON_NO_ATTACH_CONSOLE: '1',
   });
 
-  crmProcess = fork(entry, [], {
-    cwd: backendPath,
-    env: childEnv,
-    silent: true,
-    windowsHide: true,
-    execPath: process.execPath,
-  });
+  const scriptPath = existsSync(bootstrap) ? bootstrap : entry;
+  crmProcess = startCrmChildProcess(scriptPath, backendPath, childEnv);
 
   const appendOutput = (chunk: Buffer | string) => {
     const text = String(chunk);
     lastCrmOutput += text;
-    if (lastCrmOutput.length > 32_000) lastCrmOutput = lastCrmOutput.slice(-24_000);
+    if (lastCrmOutput.length > 64_000) lastCrmOutput = lastCrmOutput.slice(-48_000);
     console.log('[CRM]', text.trimEnd());
   };
 
-  crmProcess.stdout?.on('data', appendOutput);
-  crmProcess.stderr?.on('data', appendOutput);
-  crmProcess.on('error', (err) => {
-    lastCrmOutput += `\n${err.message}`;
-    console.error('[CRM] spawn error', err);
-  });
-  crmProcess.on('exit', (code) => {
-    exited = true;
-    exitCode = code ?? null;
-    crmProcess = null;
-  });
+  if (isUtilityProcess(crmProcess)) {
+    crmProcess.stdout?.on('data', appendOutput);
+    crmProcess.stderr?.on('data', appendOutput);
+    crmProcess.on('exit', (code) => {
+      exited = true;
+      exitCode = code ?? null;
+      crmProcess = null;
+    });
+  } else {
+    crmProcess.stdout?.on('data', appendOutput);
+    crmProcess.stderr?.on('data', appendOutput);
+    crmProcess.on('error', (err) => {
+      lastCrmOutput += `\n${err.message}`;
+    });
+    crmProcess.on('exit', (code) => {
+      exited = true;
+      exitCode = code ?? null;
+      crmProcess = null;
+    });
+  }
 
   try {
     await waitForServer(crmPort, () => ({ exited, exitCode, output: lastCrmOutput }));
   } catch (err) {
     if (crmProcess) {
-      crmProcess.kill();
+      killCrmChild(crmProcess);
       crmProcess = null;
     }
-    throw err;
+    const logFile = persistCrmLog(lastCrmOutput);
+    const base = err instanceof Error ? err.message : String(err);
+    throw new Error(`${base}\n\nLog saved: ${logFile}`);
   }
 
   return crmPort;
 };
 
+const startCrmChildProcess = (
+  scriptPath: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv
+): CrmChild => {
+  try {
+    return utilityProcess.fork(scriptPath, [], {
+      cwd,
+      env,
+      stdio: 'pipe',
+      serviceName: 'InsureCRM CRM Backend',
+    });
+  } catch (utilityErr) {
+    console.warn('[CRM] utilityProcess unavailable, using spawn fallback:', utilityErr);
+    return spawn(getNodeExecutable(), [scriptPath], {
+      cwd,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: false,
+      windowsHide: true,
+    });
+  }
+};
+
 export const stopCrmServer = (): void => {
   if (crmProcess) {
-    crmProcess.kill();
+    killCrmChild(crmProcess);
     crmProcess = null;
   }
 };
@@ -134,7 +198,7 @@ const waitForServer = (
     };
 
     const check = () => {
-      const { exited, exitCode, output } = getStatus();
+      const { exited, exitCode } = getStatus();
       if (exited) {
         fail(`CRM process exited before it was ready (code ${exitCode ?? 'unknown'})`);
         return;

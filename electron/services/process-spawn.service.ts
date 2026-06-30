@@ -54,6 +54,16 @@ export const spawnAsync = (
     });
   });
 
+/** Minimal env for CRM child — full Electron process.env can crash Node children on Windows. */
+export const crmChildEnv = (extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => {
+  const keep = ['PATH', 'Path', 'SYSTEMROOT', 'TEMP', 'TMP', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'HOME', 'LANG'];
+  const base: NodeJS.ProcessEnv = {};
+  for (const key of keep) {
+    if (process.env[key]) base[key] = process.env[key];
+  }
+  return nodeRuntimeEnv({ ...base, ...extra });
+};
+
 export const runNodeScript = (
   scriptPath: string,
   args: string[],

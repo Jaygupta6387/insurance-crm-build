@@ -13,9 +13,10 @@ const swaggerSpec = require('./config/swagger');
 const { generalLimiter } = require('./middleware/rateLimiter');
 const errorHandler = require('./middleware/errorHandler');
 const routes = require('./routes/index');
-const { getSuperAdminClient } = require('./prisma/superAdminClient');
-const { disconnectSuperAdmin } = require('./prisma/superAdminClient');
 const { disconnectAllCompanyClients, isDesktopMode } = require('./modules/dynamic-db/dbResolver');
+
+const getSuperAdminClient = () => require('./prisma/superAdminClient').getSuperAdminClient();
+const disconnectSuperAdmin = () => require('./prisma/superAdminClient').disconnectSuperAdmin();
 
 const app = express();
 

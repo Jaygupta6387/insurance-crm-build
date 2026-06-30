@@ -1,11 +1,12 @@
 const { PrismaClient } = require('../../generated/company-client');
-const { getSuperAdminClient } = require('../../prisma/superAdminClient');
 const { decryptText } = require('../../utils/cryptoHelper');
 const { dbEncryption } = require('../../config/env');
 const logger = require('../../config/logger');
 const { validateDesktopSubscription } = require('../licensing/desktopHeartbeat.service');
 
 const isDesktopMode = () => process.env.CRM_MODE === 'desktop';
+
+const getSuperAdminClient = () => require('../../prisma/superAdminClient').getSuperAdminClient();
 
 /**
  * Per-slug cache of live PrismaClient instances.

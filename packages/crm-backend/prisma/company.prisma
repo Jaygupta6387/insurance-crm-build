@@ -3,8 +3,9 @@
 // At runtime, this client is instantiated with a dynamic connection URL
 // resolved from the Super Admin DB company configuration.
 generator client {
-  provider = "prisma-client-js"
-  output   = "../src/generated/company-client"
+  provider      = "prisma-client-js"
+  output        = "../src/generated/company-client"
+  binaryTargets = ["native"]
 }
 
 // ─── Datasource ───────────────────────────────────────────────────────────────
