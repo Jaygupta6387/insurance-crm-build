@@ -34,14 +34,25 @@ const buildTokenPayload = (user, companySlug) => ({
   full_name: user.full_name,
 });
 
+const isDesktopMode = () => process.env.CRM_MODE === 'desktop';
+
 /**
  * Cookie options for the httpOnly refresh token.
+ * Desktop serves over http://127.0.0.1 — Secure cookies are dropped by the browser.
  */
 const refreshCookieOptions = (expires) => ({
   httpOnly: true,
-  secure: process.env.NODE_ENV === 'production',
-  sameSite: 'strict',
+  secure: !isDesktopMode() && process.env.NODE_ENV === 'production',
+  sameSite: isDesktopMode() ? 'lax' : 'strict',
+  path: '/',
   expires,
+});
+
+const clearRefreshCookieOptions = () => ({
+  httpOnly: true,
+  secure: !isDesktopMode() && process.env.NODE_ENV === 'production',
+  sameSite: isDesktopMode() ? 'lax' : 'strict',
+  path: '/',
 });
 
 module.exports = {
@@ -51,4 +62,5 @@ module.exports = {
   verifyRefreshToken,
   buildTokenPayload,
   refreshCookieOptions,
+  clearRefreshCookieOptions,
 };

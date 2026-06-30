@@ -42,6 +42,7 @@ export default function LoginPage() {
 
       setAuth({
         accessToken: data.data.accessToken,
+        refreshToken: data.data.refreshToken ?? null,
         user: data.data.user,
         companySlug: company_slug,
       });

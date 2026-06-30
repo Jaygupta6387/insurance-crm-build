@@ -59,8 +59,13 @@ function SessionRestorer({ children }: { children: ReactNode }) {
     authService
       .refresh()
       .then((res) => {
-        const { accessToken, user } = res.data.data;
-        setAuth({ accessToken, user, companySlug: company_slug });
+        const { accessToken, refreshToken, user } = res.data.data;
+        setAuth({
+          accessToken,
+          refreshToken: refreshToken ?? null,
+          user,
+          companySlug: company_slug,
+        });
       })
       .catch(() => {
         setLoading(false);

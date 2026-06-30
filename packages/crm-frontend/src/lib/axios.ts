@@ -1,5 +1,5 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from 'axios';
-import { useAuthStore } from '@/store/authStore';
+import { isDesktopCrm, useAuthStore } from '@/store/authStore';
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL || '/api',
@@ -28,6 +28,14 @@ const processQueue = (error: unknown, token: string | null = null) => {
   failedQueue = [];
 };
 
+const redirectToLogin = () => {
+  const slug = useAuthStore.getState().companySlug;
+  const loginPath = slug ? `/${slug}/login` : '/login';
+  if (!window.location.pathname.endsWith('/login')) {
+    window.location.href = loginPath;
+  }
+};
+
 api.interceptors.response.use(
   (response) => response,
   async (error: AxiosError & { config: InternalAxiosRequestConfig & { _retry?: boolean } }) => {
@@ -36,7 +44,8 @@ api.interceptors.response.use(
     if (
       error.response?.status === 401 &&
       !originalRequest._retry &&
-      !originalRequest.url?.includes('/auth/refresh')
+      !originalRequest.url?.includes('/auth/refresh') &&
+      !originalRequest.url?.includes('/auth/login')
     ) {
       if (isRefreshing) {
         return new Promise((resolve, reject) => {
@@ -53,9 +62,16 @@ api.interceptors.response.use(
       isRefreshing = true;
 
       try {
-        const { data } = await api.post('/auth/refresh');
+        const refreshToken = useAuthStore.getState().refreshToken;
+        const { data } = await api.post(
+          '/auth/refresh',
+          isDesktopCrm() && refreshToken ? { refresh_token: refreshToken } : {}
+        );
         const newToken = data.data.accessToken;
         useAuthStore.getState().setAccessToken(newToken);
+        if (data.data.refreshToken) {
+          useAuthStore.getState().setRefreshToken(data.data.refreshToken);
+        }
         if (data.data.user) {
           useAuthStore.getState().setUser(data.data.user);
         }
@@ -65,8 +81,7 @@ api.interceptors.response.use(
       } catch (refreshError) {
         processQueue(refreshError, null);
         useAuthStore.getState().logout();
-        const slug = useAuthStore.getState().companySlug;
-        window.location.href = slug ? `/${slug}/login` : '/login';
+        redirectToLogin();
         return Promise.reject(refreshError);
       } finally {
         isRefreshing = false;

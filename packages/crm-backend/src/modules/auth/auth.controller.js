@@ -4,7 +4,7 @@ const {
   sendSuccess,
   sendError,
 } = require('../../utils/responseHelper');
-const { refreshCookieOptions } = require('../../utils/tokenHelper');
+const { refreshCookieOptions, clearRefreshCookieOptions } = require('../../utils/tokenHelper');
 const { isDesktopMode } = require('../dynamic-db/dbResolver');
 
 const REFRESH_COOKIE_NAME = 'crm_refresh_token';
@@ -27,13 +27,18 @@ const login = asyncWrapper(async (req, res) => {
   const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
   res.cookie(REFRESH_COOKIE_NAME, refreshToken, refreshCookieOptions(expires));
 
-  sendSuccess(res, { accessToken, user }, 'Login successful');
+  const payload = { accessToken, user };
+  if (isDesktopMode()) payload.refreshToken = refreshToken;
+
+  sendSuccess(res, payload, 'Login successful');
 });
 
 // ─── Refresh Token ────────────────────────────────────────────────────────────
 
 const refresh = asyncWrapper(async (req, res) => {
-  const rawRefreshToken = req.cookies?.[REFRESH_COOKIE_NAME];
+  const rawRefreshToken =
+    req.cookies?.[REFRESH_COOKIE_NAME] ||
+    (isDesktopMode() ? req.body?.refresh_token : null);
   if (!rawRefreshToken) {
     return sendError(res, 'No refresh token — please log in', 401);
   }
@@ -43,7 +48,10 @@ const refresh = asyncWrapper(async (req, res) => {
   const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
   res.cookie(REFRESH_COOKIE_NAME, refreshToken, refreshCookieOptions(expires));
 
-  sendSuccess(res, { accessToken, user }, 'Token refreshed');
+  const payload = { accessToken, user };
+  if (isDesktopMode()) payload.refreshToken = refreshToken;
+
+  sendSuccess(res, payload, 'Token refreshed');
 });
 
 // ─── Get Me ───────────────────────────────────────────────────────────────────
@@ -91,11 +99,7 @@ const changeFirstPassword = asyncWrapper(async (req, res) => {
 // ─── Logout ───────────────────────────────────────────────────────────────────
 
 const logout = asyncWrapper(async (req, res) => {
-  res.clearCookie(REFRESH_COOKIE_NAME, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
-  });
+  res.clearCookie(REFRESH_COOKIE_NAME, clearRefreshCookieOptions());
   sendSuccess(res, {}, 'Logged out successfully.');
 });
 
