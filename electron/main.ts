@@ -8,6 +8,7 @@ import {
   getDefaultPostgresConfig,
   installPostgres,
   resetPostgresData,
+  ensurePostgresRunning,
 } from './services/postgres-installer';
 import { createDatabase, runMigrations, seedAdminUser, buildDatabaseUrl } from './services/db-bootstrap.service';
 import { getCrmBackendPath } from './services/app-paths.service';
@@ -70,9 +71,9 @@ const ensureLicenseMetadata = async () => {
 };
 
 const ensureAdminSeeded = async (store: ReturnType<typeof loadSecureStore>) => {
-  if (!store.databaseUrl || !store.adminEmail || !store.adminPasswordHash) return;
+  if (!store.adminEmail || !store.adminPasswordHash) return;
   try {
-    const config = getDefaultPostgresConfig();
+    const config = await ensurePostgresRunning();
     await seedAdminUser(
       config,
       store.adminEmail,
@@ -123,9 +124,10 @@ const launchCrm = async (store: ReturnType<typeof loadSecureStore>): Promise<str
   if (!store.setupComplete) {
     throw new Error('Setup is not complete yet');
   }
-  if (!store.databaseUrl) {
-    throw new Error('Local database is not configured. Run setup again.');
-  }
+
+  const config = await ensurePostgresRunning((msg) => console.log('[postgres]', msg));
+  const databaseUrl = buildDatabaseUrl(config);
+  saveSecureStore({ ...loadSecureStore(), databaseUrl, dbPort: config.port });
 
   const slug = store.subdomain || 'local';
   const backendEntry = join(getCrmBackendPath(), 'src', 'server.js');
@@ -133,8 +135,10 @@ const launchCrm = async (store: ReturnType<typeof loadSecureStore>): Promise<str
     throw new Error(`CRM backend missing from install: ${backendEntry}`);
   }
 
+  stopCrmServer();
+
   await startCrmServer({
-    DESKTOP_DATABASE_URL: store.databaseUrl,
+    DESKTOP_DATABASE_URL: databaseUrl,
     DESKTOP_LICENSE_TOKEN: store.licenseToken || '',
     DESKTOP_MACHINE_HASH: store.machineHash || '',
     DESKTOP_COMPANY_SLUG: slug,

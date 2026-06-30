@@ -637,7 +637,73 @@ export const installPostgres = async (
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(buildStartFailureMessage(config.port, config.dataDir, message));
   }
+
+  const store = loadSecureStore();
+  saveSecureStore({
+    ...store,
+    dbPort: config.port,
+    dbUser: config.user,
+    dbPassword: config.password,
+    dbName: config.database,
+    databaseUrl: buildDatabaseUrl(config),
+  });
+};
+
+/**
+ * Start local PostgreSQL if needed and return config with the live port/credentials.
+ * Safe to call on every CRM launch (does not reset data).
+ */
+export const ensurePostgresRunning = async (
+  onProgress: (msg: string) => void = () => {}
+): Promise<PostgresConfig> => {
+  const config = ensurePostgresCredentials();
+
+  const binName = process.platform === 'win32' ? 'pg_ctl.exe' : 'pg_ctl';
+  const initName = process.platform === 'win32' ? 'initdb.exe' : 'initdb';
+  const pgCtl = await resolvePgBin(binName);
+  const initdb = await resolvePgBin(initName);
+
+  if (!pgCtl || !initdb) {
+    throw new Error(
+      'PostgreSQL is not available in this install. Reinstall InsureCRM Desktop or run setup again.'
+    );
+  }
+
+  if (!isClusterInitialized(config.dataDir)) {
+    throw new Error('Local database has not been set up. Complete setup in InsureCRM Desktop.');
+  }
+
+  const runningPort = await isOurClusterRunning(config.dataDir, pgCtl);
+  if (runningPort) {
+    config.port = runningPort;
+    onProgress(`PostgreSQL already running on port ${runningPort}`);
+    await syncPostgresRolePassword(config, pgCtl, onProgress);
+  } else {
+    await removeStalePidFile(config.dataDir);
+    const clusterPort = readClusterPort(config.dataDir);
+    if (clusterPort) config.port = clusterPort;
+
+    const pgEnv = pgRuntimeEnv(pgCtl, config.dataDir);
+    onProgress(`Starting PostgreSQL on port ${config.port}…`);
+    await startPostgresServer(pgCtl, config, pgEnv, onProgress);
+    await waitForPostgresReady(config, pgCtl, START_TIMEOUT_MS);
+    await syncPostgresRolePassword(config, pgCtl, onProgress);
+    onProgress(`PostgreSQL ready on port ${config.port}`);
+  }
+
+  const store = loadSecureStore();
+  const databaseUrl = buildDatabaseUrl(config);
+  saveSecureStore({
+    ...store,
+    dbPort: config.port,
+    dbUser: config.user,
+    dbPassword: config.password,
+    dbName: config.database,
+    databaseUrl,
+  });
+
+  return config;
 };
 
 export const buildDatabaseUrl = (config: PostgresConfig): string =>
-  `postgresql://${encodeURIComponent(config.user)}:${encodeURIComponent(config.password)}@${config.host}:${config.port}/${config.database}`;
+  `postgresql://${encodeURIComponent(config.user)}:${encodeURIComponent(config.password)}@${config.host}:${config.port}/${encodeURIComponent(config.database)}?sslmode=disable`;
