@@ -1,4 +1,3 @@
-const axios = require('axios');
 const logger = require('../../config/logger');
 
 const CLOUD_API_URL = process.env.LICENSE_CLOUD_API_URL || process.env.SUPER_ADMIN_API_URL || 'http://localhost:5001/api';
@@ -7,6 +6,35 @@ const HEARTBEAT_INTERVAL_MS = parseInt(process.env.LICENSE_HEARTBEAT_INTERVAL_MS
 let lastHeartbeat = null;
 let lastHeartbeatOk = true;
 let lastHeartbeatError = null;
+
+const postJson = async (url, body, headers, timeoutMs = 15_000) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    let data;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = text;
+    }
+    if (!res.ok) {
+      const message = data?.message || `HTTP ${res.status}`;
+      const err = new Error(message);
+      err.statusCode = res.status;
+      throw err;
+    }
+    return data;
+  } finally {
+    clearTimeout(timer);
+  }
+};
 
 /**
  * Calls cloud license heartbeat. Used in CRM_MODE=desktop instead of super-admin DB lookup.
@@ -19,24 +47,21 @@ const heartbeat = async (licenseToken) => {
   }
 
   try {
-    const res = await axios.post(
+    const data = await postJson(
       `${CLOUD_API_URL}/licenses/heartbeat`,
       { machine_hash: process.env.DESKTOP_MACHINE_HASH || '' },
-      {
-        headers: { Authorization: `Bearer ${licenseToken}` },
-        timeout: 15000,
-      }
+      { Authorization: `Bearer ${licenseToken}` }
     );
     lastHeartbeat = Date.now();
     lastHeartbeatOk = true;
     lastHeartbeatError = null;
-    return res.data?.data || res.data;
+    return data?.data || data;
   } catch (err) {
     lastHeartbeatOk = false;
-    lastHeartbeatError = err.response?.data?.message || err.message;
+    lastHeartbeatError = err.message;
     logger.warn(`License heartbeat failed: ${lastHeartbeatError}`);
     throw Object.assign(new Error(lastHeartbeatError || 'License validation failed'), {
-      statusCode: err.response?.status || 403,
+      statusCode: err.statusCode || 403,
     });
   }
 };

@@ -65,6 +65,12 @@ export const startCrmServer = async (env: Record<string, string>): Promise<numbe
     );
   }
 
+  const requiredModules = ['bcryptjs', 'zod', 'winston', '@prisma/client', 'jsonwebtoken'];
+  const missingMods = requiredModules.filter((m) => !existsSync(join(backendPath, 'node_modules', m)));
+  if (missingMods.length) {
+    throw new Error(`CRM install is incomplete (missing: ${missingMods.join(', ')}). Reinstall the latest version.`);
+  }
+
   lastCrmOutput = '';
   let exited = false;
   let exitCode: number | null = null;

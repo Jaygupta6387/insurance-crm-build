@@ -67,11 +67,7 @@ jobs:
           node scripts/bundle-postgresql.mjs --platform mac
 
       - name: Verify CRM bundle before packaging
-        run: |
-          test -f packages/crm-backend/crm-bootstrap.cjs
-          test -f packages/crm-backend/node_modules/express/package.json
-          test -f packages/crm-backend/src/generated/company-client/index.js
-          test -f packages/crm-frontend/dist/index.html
+        run: node scripts/verify-crm-bundle.mjs
 
       - name: Publish macOS release
         if: matrix.platform == 'mac'
