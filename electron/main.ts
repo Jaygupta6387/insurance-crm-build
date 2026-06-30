@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, shell } from 'electron';
+import { existsSync } from 'fs';
 import { join } from 'path';
 import { loadSecureStore, saveSecureStore, clearSecureStore } from './services/secure-store.service';
 import { collectFingerprint } from './services/fingerprint.service';
@@ -9,6 +10,7 @@ import {
   resetPostgresData,
 } from './services/postgres-installer';
 import { createDatabase, runMigrations, seedAdminUser, buildDatabaseUrl } from './services/db-bootstrap.service';
+import { getCrmBackendPath } from './services/app-paths.service';
 import { startCrmServer, stopCrmServer, getCrmAppUrl } from './services/crm-server.service';
 import { initAutoUpdater, installUpdate, checkForUpdates } from './services/updater.service';
 
@@ -46,57 +48,93 @@ const ensureLicenseMetadata = async () => {
   if (store.adminPasswordHash && store.adminName) return store;
   if (!store.licenseKey) return store;
 
-  const fp = await collectFingerprint();
-  const result = await activateLicense(store.licenseKey, fp);
-  store = {
-    ...store,
-    licenseToken: result.license_token,
-    adminPasswordHash: result.admin_password_hash,
-    adminName: result.admin_name,
-    adminEmail: result.admin_email,
-    subdomain: result.subdomain,
-    companyName: result.company_name,
-    machineHash: fp.machineHash,
-  };
-  saveSecureStore(store);
-  return store;
+  try {
+    const fp = await collectFingerprint();
+    const result = await activateLicense(store.licenseKey, fp);
+    store = {
+      ...store,
+      licenseToken: result.license_token,
+      adminPasswordHash: result.admin_password_hash,
+      adminName: result.admin_name,
+      adminEmail: result.admin_email,
+      subdomain: result.subdomain,
+      companyName: result.company_name,
+      machineHash: fp.machineHash,
+    };
+    saveSecureStore(store);
+  } catch (err) {
+    console.warn('[license] metadata refresh skipped:', err instanceof Error ? err.message : err);
+  }
+
+  return loadSecureStore();
 };
 
 const ensureAdminSeeded = async (store: ReturnType<typeof loadSecureStore>) => {
   if (!store.databaseUrl || !store.adminEmail || !store.adminPasswordHash) return;
-  const config = getDefaultPostgresConfig();
-  await seedAdminUser(
-    config,
-    store.adminEmail,
-    store.adminPasswordHash,
-    store.adminName || store.companyName || 'Admin',
-    () => {}
-  );
-};
-
-const bootstrapApp = async (): Promise<'activation' | 'setup' | 'crm' | 'locked'> => {
-  let store = loadSecureStore();
-  if (!store.licenseToken) return 'activation';
-  if (!store.setupComplete) return 'setup';
-
   try {
-    store = await ensureLicenseMetadata();
-    await ensureAdminSeeded(store);
-    await launchCrm(store);
-    void heartbeatLicenseWithRetry(store.licenseToken!, store.machineHash || '').catch((err) => {
-      console.warn('[license] heartbeat after launch:', err.message);
-    });
-    return 'crm';
+    const config = getDefaultPostgresConfig();
+    await seedAdminUser(
+      config,
+      store.adminEmail,
+      store.adminPasswordHash,
+      store.adminName || store.companyName || 'Admin',
+      () => {}
+    );
   } catch (err) {
-    console.error('[bootstrap] CRM launch failed:', err);
-    return 'locked';
+    console.warn('[setup] admin seed skipped:', err instanceof Error ? err.message : err);
   }
 };
 
+const navigateMainWindowTo = async (url: string): Promise<void> => {
+  if (!mainWindow) throw new Error('Application window is not ready');
+
+  await new Promise<void>((resolve, reject) => {
+    const wc = mainWindow!.webContents;
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error('Timed out loading CRM in the main window'));
+    }, 60_000);
+
+    const onFail = (_event: Electron.Event, code: number, description: string) => {
+      cleanup();
+      reject(new Error(`Could not open CRM page (${code}): ${description}`));
+    };
+
+    const onFinish = () => {
+      const current = wc.getURL();
+      if (!current.includes('127.0.0.1')) return;
+      cleanup();
+      resolve();
+    };
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      wc.removeListener('did-fail-load', onFail);
+      wc.removeListener('did-finish-load', onFinish);
+    };
+
+    wc.once('did-fail-load', onFail);
+    wc.once('did-finish-load', onFinish);
+    void wc.loadURL(url);
+  });
+};
+
 const launchCrm = async (store: ReturnType<typeof loadSecureStore>): Promise<string> => {
+  if (!store.setupComplete) {
+    throw new Error('Setup is not complete yet');
+  }
+  if (!store.databaseUrl) {
+    throw new Error('Local database is not configured. Run setup again.');
+  }
+
   const slug = store.subdomain || 'local';
+  const backendEntry = join(getCrmBackendPath(), 'src', 'server.js');
+  if (!existsSync(backendEntry)) {
+    throw new Error(`CRM backend missing from install: ${backendEntry}`);
+  }
+
   await startCrmServer({
-    DESKTOP_DATABASE_URL: store.databaseUrl || '',
+    DESKTOP_DATABASE_URL: store.databaseUrl,
     DESKTOP_LICENSE_TOKEN: store.licenseToken || '',
     DESKTOP_MACHINE_HASH: store.machineHash || '',
     DESKTOP_COMPANY_SLUG: slug,
@@ -110,10 +148,15 @@ const launchCrm = async (store: ReturnType<typeof loadSecureStore>): Promise<str
   });
 
   const url = getCrmAppUrl(slug);
-  if (mainWindow) {
-    await mainWindow.loadURL(url);
-  }
+  await navigateMainWindowTo(url);
   return url;
+};
+
+const bootstrapApp = async (): Promise<'activation' | 'setup' | 'crm' | 'locked'> => {
+  const store = loadSecureStore();
+  if (!store.licenseToken) return 'activation';
+  if (!store.setupComplete) return 'setup';
+  return 'crm';
 };
 
 app.whenReady().then(() => {
@@ -208,9 +251,8 @@ ipcMain.handle('setup:run', async () => {
       run: async (onProgress) => {
         const creds = loadSecureStore();
         if (!creds.adminEmail || !creds.adminPasswordHash) {
-          throw new Error(
-            'Admin credentials missing from license activation. Deactivate and re-activate with a new license, or contact support.'
-          );
+          onProgress('Skipping admin seed — use welcome-email password after Super Admin is updated');
+          return;
         }
         await seedAdminUser(
           config,
@@ -237,8 +279,8 @@ ipcMain.handle('setup:run', async () => {
           setupComplete: false,
         };
         saveSecureStore(partialStore);
-        await launchCrm(partialStore);
         saveSecureStore({ ...loadSecureStore(), setupComplete: true });
+        await launchCrm(loadSecureStore());
         onProgress('Ready — use the welcome email password to sign in');
       },
     },
@@ -257,6 +299,17 @@ ipcMain.handle('setup:run', async () => {
   const crmUrl = getCrmAppUrl(finalStore.subdomain || 'local');
   send({ step: steps.length, total: steps.length, label: 'Ready', progress: 100, status: 'complete' });
   return { success: true, crmUrl };
+});
+
+ipcMain.handle('crm:open', async () => {
+  let store = await ensureLicenseMetadata();
+  await ensureAdminSeeded(store);
+  store = loadSecureStore();
+  const url = await launchCrm(store);
+  void heartbeatLicenseWithRetry(store.licenseToken!, store.machineHash || '').catch((err) => {
+    console.warn('[license] heartbeat after open:', err.message);
+  });
+  return { url };
 });
 
 ipcMain.handle('license:transfer', async (_e, payload: { reason: string; new_device_name: string }) => {

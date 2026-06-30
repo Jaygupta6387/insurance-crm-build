@@ -1,5 +1,5 @@
 import { fork, ChildProcess } from 'child_process';
-import { mkdirSync } from 'fs';
+import { existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { app } from 'electron';
 import { getCrmBackendPath, getCrmFrontendDistPath } from './app-paths.service';
@@ -24,13 +24,28 @@ const tailOutput = (text: string, maxLines = 16): string =>
   text.split(/\r?\n/).filter(Boolean).slice(-maxLines).join('\n').trim();
 
 export const startCrmServer = async (env: Record<string, string>): Promise<number> => {
-  if (crmProcess) return crmPort;
+  if (crmProcess && !crmProcess.killed && crmPort > 0) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${crmPort}/api/health`);
+      if (res.ok) return crmPort;
+    } catch {
+      // stale process — restart below
+    }
+    stopCrmServer();
+  }
 
   crmPort = await getPort();
   const backendPath = getCrmBackendPath();
   const entry = join(backendPath, 'src/server.js');
   const frontendDist = getCrmFrontendDistPath();
   const logDir = getCrmLogDir();
+
+  if (!existsSync(entry)) {
+    throw new Error(`CRM backend not found: ${entry}`);
+  }
+  if (!existsSync(join(frontendDist, 'index.html'))) {
+    throw new Error(`CRM frontend not found: ${join(frontendDist, 'index.html')}`);
+  }
 
   lastCrmOutput = '';
   let exited = false;
@@ -53,6 +68,7 @@ export const startCrmServer = async (env: Record<string, string>): Promise<numbe
     env: childEnv,
     silent: true,
     windowsHide: true,
+    execPath: process.execPath,
   });
 
   const appendOutput = (chunk: Buffer | string) => {

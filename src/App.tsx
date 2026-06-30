@@ -3,6 +3,7 @@ import ActivationScreen from './pages/ActivationScreen';
 import SetupWizard from './pages/SetupWizard';
 import LockScreen from './pages/LockScreen';
 import TransferForm from './pages/TransferForm';
+import CrmLauncher from './pages/CrmLauncher';
 import UpdateBanner from './components/UpdateBanner';
 
 type AppView = 'loading' | 'activation' | 'setup' | 'crm' | 'locked' | 'transfer';
@@ -57,11 +58,7 @@ export default function App() {
     if (view === 'transfer') {
       return <TransferForm />;
     }
-    return (
-      <div className="app-shell">
-        <p style={{ color: '#64748b' }}>CRM is running in the main window.</p>
-      </div>
-    );
+    return <CrmLauncher />;
   })();
 
   return (
