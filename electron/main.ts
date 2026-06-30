@@ -2,14 +2,14 @@ import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import { join } from 'path';
 import { loadSecureStore, saveSecureStore, clearSecureStore } from './services/secure-store.service';
 import { collectFingerprint } from './services/fingerprint.service';
-import { activateLicense, heartbeatLicense, requestTransfer } from './services/license.service';
+import { activateLicense, heartbeatLicenseWithRetry, requestTransfer } from './services/license.service';
 import {
   getDefaultPostgresConfig,
   installPostgres,
   resetPostgresData,
 } from './services/postgres-installer';
-import { createDatabase, runMigrations, buildDatabaseUrl } from './services/db-bootstrap.service';
-import { startCrmServer, stopCrmServer, getCrmUrl } from './services/crm-server.service';
+import { createDatabase, runMigrations, seedAdminUser, buildDatabaseUrl } from './services/db-bootstrap.service';
+import { startCrmServer, stopCrmServer, getCrmAppUrl } from './services/crm-server.service';
 import { initAutoUpdater, installUpdate, checkForUpdates } from './services/updater.service';
 
 let mainWindow: BrowserWindow | null = null;
@@ -41,26 +41,65 @@ const createWindow = (): BrowserWindow => {
   return win;
 };
 
+const ensureLicenseMetadata = async () => {
+  let store = loadSecureStore();
+  if (store.adminPasswordHash && store.adminName) return store;
+  if (!store.licenseKey) return store;
+
+  const fp = await collectFingerprint();
+  const result = await activateLicense(store.licenseKey, fp);
+  store = {
+    ...store,
+    licenseToken: result.license_token,
+    adminPasswordHash: result.admin_password_hash,
+    adminName: result.admin_name,
+    adminEmail: result.admin_email,
+    subdomain: result.subdomain,
+    companyName: result.company_name,
+    machineHash: fp.machineHash,
+  };
+  saveSecureStore(store);
+  return store;
+};
+
+const ensureAdminSeeded = async (store: ReturnType<typeof loadSecureStore>) => {
+  if (!store.databaseUrl || !store.adminEmail || !store.adminPasswordHash) return;
+  const config = getDefaultPostgresConfig();
+  await seedAdminUser(
+    config,
+    store.adminEmail,
+    store.adminPasswordHash,
+    store.adminName || store.companyName || 'Admin',
+    () => {}
+  );
+};
+
 const bootstrapApp = async (): Promise<'activation' | 'setup' | 'crm' | 'locked'> => {
-  const store = loadSecureStore();
+  let store = loadSecureStore();
   if (!store.licenseToken) return 'activation';
   if (!store.setupComplete) return 'setup';
 
   try {
-    await heartbeatLicense(store.licenseToken, store.machineHash || '');
+    store = await ensureLicenseMetadata();
+    await ensureAdminSeeded(store);
     await launchCrm(store);
+    void heartbeatLicenseWithRetry(store.licenseToken!, store.machineHash || '').catch((err) => {
+      console.warn('[license] heartbeat after launch:', err.message);
+    });
     return 'crm';
-  } catch {
+  } catch (err) {
+    console.error('[bootstrap] CRM launch failed:', err);
     return 'locked';
   }
 };
 
-const launchCrm = async (store: ReturnType<typeof loadSecureStore>) => {
-  const port = await startCrmServer({
+const launchCrm = async (store: ReturnType<typeof loadSecureStore>): Promise<string> => {
+  const slug = store.subdomain || 'local';
+  await startCrmServer({
     DESKTOP_DATABASE_URL: store.databaseUrl || '',
     DESKTOP_LICENSE_TOKEN: store.licenseToken || '',
     DESKTOP_MACHINE_HASH: store.machineHash || '',
-    DESKTOP_COMPANY_SLUG: store.subdomain || 'local',
+    DESKTOP_COMPANY_SLUG: slug,
     JWT_ACCESS_SECRET: process.env.JWT_ACCESS_SECRET || 'desktop-access-secret-min-32-chars!!',
     JWT_REFRESH_SECRET: process.env.JWT_REFRESH_SECRET || 'desktop-refresh-secret-min-32-chars!',
     MAIL_FROM_ADDRESS: 'noreply@example.com',
@@ -70,9 +109,11 @@ const launchCrm = async (store: ReturnType<typeof loadSecureStore>) => {
     FRONTEND_RESET_PASSWORD_URL: 'http://127.0.0.1/reset',
   });
 
+  const url = getCrmAppUrl(slug);
   if (mainWindow) {
-    mainWindow.loadURL(getCrmUrl());
+    await mainWindow.loadURL(url);
   }
+  return url;
 };
 
 app.whenReady().then(() => {
@@ -126,6 +167,8 @@ ipcMain.handle('license:activate', async (_e, licenseKey: string) => {
       tenantId: result.tenant_id,
       companyName: result.company_name,
       adminEmail: result.admin_email,
+      adminName: result.admin_name,
+      adminPasswordHash: result.admin_password_hash,
       subdomain: result.subdomain,
       machineHash: fp.machineHash,
       setupComplete: false,
@@ -142,7 +185,6 @@ ipcMain.handle('setup:reset-postgres', async () => {
 });
 
 ipcMain.handle('setup:run', async () => {
-  const store = loadSecureStore();
   const config = getDefaultPostgresConfig();
   const steps: Array<{ id: string; label: string; run: (onProgress: (m: string) => void) => Promise<void> }> = [
     {
@@ -159,6 +201,25 @@ ipcMain.handle('setup:run', async () => {
       id: 'migrations',
       label: 'Creating Tables',
       run: async (onProgress) => runMigrations(config, onProgress),
+    },
+    {
+      id: 'seed',
+      label: 'Creating Admin User',
+      run: async (onProgress) => {
+        const creds = loadSecureStore();
+        if (!creds.adminEmail || !creds.adminPasswordHash) {
+          throw new Error(
+            'Admin credentials missing from license activation. Deactivate and re-activate with a new license, or contact support.'
+          );
+        }
+        await seedAdminUser(
+          config,
+          creds.adminEmail,
+          creds.adminPasswordHash,
+          creds.adminName || creds.companyName || 'Admin',
+          onProgress
+        );
+      },
     },
     {
       id: 'crm',
@@ -178,7 +239,7 @@ ipcMain.handle('setup:run', async () => {
         saveSecureStore(partialStore);
         await launchCrm(partialStore);
         saveSecureStore({ ...loadSecureStore(), setupComplete: true });
-        onProgress('Ready');
+        onProgress('Ready — use the welcome email password to sign in');
       },
     },
   ];
@@ -192,22 +253,31 @@ ipcMain.handle('setup:run', async () => {
     send({ step: i + 1, total: steps.length, label: step.label, progress: Math.round(((i + 1) / steps.length) * 100), status: 'done' });
   }
 
+  const finalStore = loadSecureStore();
+  const crmUrl = getCrmAppUrl(finalStore.subdomain || 'local');
   send({ step: steps.length, total: steps.length, label: 'Ready', progress: 100, status: 'complete' });
-  return { success: true, crmUrl: getCrmUrl() };
+  return { success: true, crmUrl };
 });
 
 ipcMain.handle('license:transfer', async (_e, payload: { reason: string; new_device_name: string }) => {
   const store = loadSecureStore();
+  if (!store.licenseToken) throw new Error('No license activated on this device');
   const fp = await collectFingerprint();
-  return requestTransfer(store.licenseToken!, {
-    ...payload,
-    new_machine_hash: fp.machineHash,
-  });
+  try {
+    return await requestTransfer(store.licenseToken, {
+      reason: payload.reason,
+      new_device_name: payload.new_device_name,
+      new_machine_hash: fp.machineHash,
+    });
+  } catch (err) {
+    throw err instanceof Error ? err : new Error('Transfer request failed');
+  }
 });
 
 ipcMain.handle('license:heartbeat', async () => {
   const store = loadSecureStore();
-  return heartbeatLicense(store.licenseToken!, store.machineHash || '');
+  if (!store.licenseToken) throw new Error('No license activated');
+  return heartbeatLicenseWithRetry(store.licenseToken, store.machineHash || '');
 });
 
 ipcMain.handle('app:openExternal', (_e, url: string) => shell.openExternal(url));

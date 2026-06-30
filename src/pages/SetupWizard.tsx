@@ -4,6 +4,7 @@ const STEPS = [
   'Installing PostgreSQL',
   'Creating Database',
   'Creating Tables',
+  'Creating Admin User',
   'Connecting CRM',
 ];
 

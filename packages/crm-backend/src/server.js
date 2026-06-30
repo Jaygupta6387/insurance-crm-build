@@ -76,6 +76,12 @@ app.use('/api', routes);
 // ─── Desktop SPA (bundled frontend) ───────────────────────────────────────────
 if (isDesktopMode() && process.env.DESKTOP_FRONTEND_DIST) {
   const dist = process.env.DESKTOP_FRONTEND_DIST;
+  const slug = (process.env.DESKTOP_COMPANY_SLUG || 'local').replace(/^\/+|\/+$/g, '');
+
+  app.get('/', (_req, res) => {
+    res.redirect(302, `/${slug}/login`);
+  });
+
   app.use(express.static(dist));
   app.get(/^\/(?!api).*/, (_req, res) => {
     res.sendFile(path.join(dist, 'index.html'));

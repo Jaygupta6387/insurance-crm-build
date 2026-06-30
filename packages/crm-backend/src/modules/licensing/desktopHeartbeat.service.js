@@ -46,12 +46,18 @@ const heartbeat = async (licenseToken) => {
  */
 const validateDesktopSubscription = async () => {
   const token = process.env.DESKTOP_LICENSE_TOKEN;
-  const stale = !lastHeartbeat || Date.now() - lastHeartbeat > HEARTBEAT_INTERVAL_MS;
-  if (stale || !lastHeartbeatOk) {
-    await heartbeat(token);
+  if (!token) {
+    throw Object.assign(new Error('No license token configured'), { statusCode: 403 });
   }
-  if (!lastHeartbeatOk) {
-    throw Object.assign(new Error(lastHeartbeatError || 'Subscription inactive'), { statusCode: 403 });
+
+  const stale = !lastHeartbeat || Date.now() - lastHeartbeat > HEARTBEAT_INTERVAL_MS;
+  if (!stale && lastHeartbeatOk) return;
+
+  try {
+    await heartbeat(token);
+  } catch (err) {
+    // Desktop CRM runs locally — do not block login/API when cloud is slow or offline.
+    logger.warn(`Background license heartbeat failed: ${lastHeartbeatError || err.message}`);
   }
 };
 

@@ -8,7 +8,14 @@ export default function TransferForm() {
   const [error, setError] = useState('');
 
   const submit = async () => {
-    if (!reason.trim() || !deviceName.trim()) return;
+    if (!reason.trim() || reason.trim().length < 5) {
+      setError('Please enter a reason (at least 5 characters)');
+      return;
+    }
+    if (!deviceName.trim()) {
+      setError('Please enter a device name');
+      return;
+    }
     setLoading(true);
     setError('');
     try {
@@ -41,7 +48,7 @@ export default function TransferForm() {
         <label htmlFor="device">New Device Name</label>
         <input id="device" value={deviceName} onChange={(e) => setDeviceName(e.target.value)} placeholder="Office PC — Windows" />
         <label htmlFor="reason" style={{ marginTop: 16 }}>Reason</label>
-        <textarea id="reason" rows={3} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Hardware upgrade, laptop replacement…" />
+        <textarea id="reason" rows={3} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Hardware upgrade, laptop replacement… (min 5 characters)" />
         {error && <p className="error">{error}</p>}
         <button type="button" className="btn btn-primary" onClick={submit} disabled={loading}>
           {loading ? 'Submitting…' : 'Submit Request'}

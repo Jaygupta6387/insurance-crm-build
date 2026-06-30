@@ -9,6 +9,8 @@ export interface SecureStoreData {
   tenantId?: string;
   companyName?: string;
   adminEmail?: string;
+  adminName?: string;
+  adminPasswordHash?: string;
   subdomain?: string;
   machineHash?: string;
   databaseUrl?: string;

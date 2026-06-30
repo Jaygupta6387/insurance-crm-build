@@ -96,6 +96,11 @@ export const stopCrmServer = (): void => {
 
 export const getCrmUrl = (): string => `http://127.0.0.1:${crmPort}`;
 
+export const getCrmAppUrl = (companySlug = 'local'): string => {
+  const slug = encodeURIComponent(companySlug.replace(/^\/+|\/+$/g, '') || 'local');
+  return `${getCrmUrl()}/${slug}/login`;
+};
+
 export const getFrontendPath = (): string => getCrmFrontendDistPath();
 
 const waitForServer = (
