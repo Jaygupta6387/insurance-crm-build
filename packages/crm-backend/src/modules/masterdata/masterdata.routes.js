@@ -100,9 +100,6 @@ router.use(authenticate, validateSubscription, requireAdmin);
  *           format: uuid
  *         name:
  *           type: string
- *         description:
- *           type: string
- *           nullable: true
  *         is_active:
  *           type: boolean
  *         created_by:
@@ -132,12 +129,7 @@ router.use(authenticate, validateSubscription, requireAdmin);
  *           default: true
  *
  *     CreateInsuranceCompanyRequest:
- *       allOf:
- *         - $ref: '#/components/schemas/CreateMasterItemRequest'
- *         - type: object
- *           properties:
- *             description:
- *               type: string
+ *       $ref: '#/components/schemas/CreateMasterItemRequest'
  */
 
 // ─── LOBs ─────────────────────────────────────────────────────────────────────

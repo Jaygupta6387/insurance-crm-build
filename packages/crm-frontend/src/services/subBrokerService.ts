@@ -124,7 +124,6 @@ export interface SubProductType {
 export interface InsuranceCompany {
   id: string;
   name: string;
-  description?: string | null;
   is_active: boolean;
   created_by?: string | null;
   updated_by?: string | null;
@@ -221,7 +220,7 @@ export const masterDataService = {
   deleteSubProduct: (id: string)                                        => api.delete(`/master/sub-products/${id}`),
 
   getInsuranceCompanies: (params?: { is_active?: boolean })            => api.get('/master/insurance-companies', { params }),
-  createInsuranceCompany: (data: { name: string; description?: string }) =>
+  createInsuranceCompany: (data: { name: string }) =>
                                                                           api.post('/master/insurance-companies', data),
   updateInsuranceCompany: (id: string, data: Partial<InsuranceCompany>) => api.put(`/master/insurance-companies/${id}`, data),
   deleteInsuranceCompany: (id: string)                                  => api.delete(`/master/insurance-companies/${id}`),

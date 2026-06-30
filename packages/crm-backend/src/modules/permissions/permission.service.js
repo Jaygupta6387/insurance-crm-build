@@ -65,6 +65,15 @@ const buildAdminPermissions = (userId) => ({
   can_create_employee: true,
   can_edit_employee: true,
   can_delete_employee: true,
+  can_view_sub_brokers: true,
+  can_create_sub_brokers: true,
+  can_edit_sub_brokers: true,
+  can_delete_sub_brokers: true,
+  can_adjust_wallet: true,
+  can_view_motor_masters: true,
+  can_create_motor_masters: true,
+  can_edit_motor_masters: true,
+  can_delete_motor_masters: true,
   can_view_reports: true,
 });
 

@@ -150,7 +150,6 @@ const createInsuranceCompany = async (data, companySlug, userId) => {
   return db.insuranceCompany.create({
     data: {
       name: data.name,
-      description: data.description ?? null,
       created_by: userId ?? null,
     },
   });
@@ -164,7 +163,6 @@ const updateInsuranceCompany = async (id, data, companySlug, userId) => {
     where: { id },
     data: {
       ...(data.name        !== undefined && { name: data.name }),
-      ...(data.description !== undefined && { description: data.description }),
       ...(data.is_active   !== undefined && { is_active: data.is_active }),
       ...(userId && { updated_by: userId }),
     },

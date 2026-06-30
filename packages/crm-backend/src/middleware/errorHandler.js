@@ -33,6 +33,9 @@ const errorHandler = (err, req, res, next) => {
         message = 'Database operation failed';
         logger.error(`Unhandled Prisma error code: ${err.code}`, { message: err.message, meta: err.meta });
     }
+  } else if (typeof message === 'string' && message.includes('Invalid `prisma.')) {
+    statusCode = 400;
+    message = message.split('\n').slice(-2).join(' ').trim() || 'Invalid database request';
   }
 
   // JWT errors

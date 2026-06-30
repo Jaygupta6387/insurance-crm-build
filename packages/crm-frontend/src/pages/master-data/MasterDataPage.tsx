@@ -129,7 +129,6 @@ export default function MasterDataPage() {
       } else if (activeTab === 'insurance') {
         const data = {
           name: formData.name || '',
-          description: formData.description || undefined,
         };
         if (editingId) await masterDataService.updateInsuranceCompany(editingId, data);
         else await masterDataService.createInsuranceCompany(data);
@@ -512,16 +511,10 @@ export default function MasterDataPage() {
                 </>
               )}
               {activeTab === 'insurance' && (
-                <>
-                  <div>
-                    <Label>Name</Label>
-                    <Input value={formData.name || ''} onChange={(e) => setFormData({ ...formData, name: e.target.value })} />
-                  </div>
-                  <div>
-                    <Label>Description</Label>
-                    <Input value={formData.description || ''} onChange={(e) => setFormData({ ...formData, description: e.target.value })} />
-                  </div>
-                </>
+                <div>
+                  <Label>Name</Label>
+                  <Input value={formData.name || ''} onChange={(e) => setFormData({ ...formData, name: e.target.value })} />
+                </div>
               )}
               {activeTab === 'health-plans' && (
                 <>
