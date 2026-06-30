@@ -30,6 +30,7 @@ const reloadShellUI = (): void => {
 
 const resetLocalInstallation = async (): Promise<void> => {
   stopCrmServer();
+  await new Promise<void>((resolve) => setTimeout(resolve, 1000));
   await resetPostgresData();
   clearSecureStore();
 };
@@ -370,10 +371,17 @@ ipcMain.handle('store:clear', () => {
 });
 
 ipcMain.handle('store:reset-for-new-license', async () => {
-  await resetLocalInstallation();
-  reloadShellUI();
-  mainWindow?.webContents.once('did-finish-load', () => {
-    mainWindow?.webContents.send('app:state', 'activation');
-  });
-  return { success: true };
+  try {
+    await resetLocalInstallation();
+    reloadShellUI();
+    mainWindow?.webContents.once('did-finish-load', () => {
+      mainWindow?.webContents.send('app:state', 'activation');
+    });
+    return { success: true };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `${message}\n\nIf this keeps failing: close InsureCRM Desktop, open Task Manager, end all postgres.exe, then reopen the app and try again.`
+    );
+  }
 });

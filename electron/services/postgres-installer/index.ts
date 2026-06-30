@@ -60,6 +60,10 @@ const stopPostgresCluster = async (dataDir: string): Promise<void> => {
   if (!pgCtl || !isClusterInitialized(dataDir)) return;
 
   const pgEnv = pgRuntimeEnv(pgCtl, dataDir);
+  await runPgAsync(pgCtl, ['-D', dataDir, 'stop', 'immediate', '-m', 'immediate'], {
+    env: pgEnv,
+    cwd: dirname(pgCtl),
+  });
   await runPgAsync(pgCtl, ['-D', dataDir, 'stop', 'fast', '-m', 'fast'], {
     env: pgEnv,
     cwd: dirname(pgCtl),
@@ -67,32 +71,135 @@ const stopPostgresCluster = async (dataDir: string): Promise<void> => {
   await sleep(2000);
 };
 
+const readPostmasterPid = (dataDir: string): number | null => {
+  const pidFile = join(dataDir, 'postmaster.pid');
+  if (!existsSync(pidFile)) return null;
+  try {
+    const pid = parseInt(readFileSync(pidFile, 'utf8').split(/\r?\n/)[0]?.trim() ?? '', 10);
+    return pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+};
+
+const killProcessByPid = async (pid: number): Promise<void> => {
+  if (process.platform === 'win32') {
+    try {
+      await execFileAsync('taskkill', ['/F', '/T', '/PID', String(pid)], { windowsHide: true });
+    } catch {
+      // process may already be gone
+    }
+    return;
+  }
+  try {
+    process.kill(pid, 'SIGKILL');
+  } catch {
+    // ignore
+  }
+};
+
+const killListenersOnPorts = async (ports: number[]): Promise<void> => {
+  const unique = [...new Set(ports.filter((p) => p > 0))];
+  if (!unique.length) return;
+
+  if (process.platform === 'win32') {
+    try {
+      const { stdout } = await execFileAsync('netstat', ['-ano'], {
+        windowsHide: true,
+        maxBuffer: 10 * 1024 * 1024,
+      });
+      const killed = new Set<string>();
+      for (const line of stdout.split(/\r?\n/)) {
+        if (!line.includes('LISTENING')) continue;
+        for (const port of unique) {
+          if (!line.includes(`:${port}`)) continue;
+          const pid = line.trim().split(/\s+/).pop();
+          if (pid && /^\d+$/.test(pid) && pid !== '0' && !killed.has(pid)) {
+            killed.add(pid);
+            await execFileAsync('taskkill', ['/F', '/T', '/PID', pid], { windowsHide: true }).catch(() => {});
+          }
+        }
+      }
+    } catch {
+      // netstat unavailable
+    }
+    return;
+  }
+
+  for (const port of unique) {
+    try {
+      const { stdout } = await execFileAsync('lsof', ['-ti', `:${port}`], { windowsHide: true });
+      const pids = stdout.trim().split(/\s+/).filter(Boolean);
+      for (const pidStr of pids) {
+        await killProcessByPid(parseInt(pidStr, 10));
+      }
+    } catch {
+      // no listener on this port
+    }
+  }
+};
+
+/** Stop PostgreSQL completely before deleting pgdata (Windows-safe). */
+export const forceStopPostgres = async (): Promise<void> => {
+  const base = getAppDataDir();
+  const pgdata = join(base, 'pgdata');
+  const store = loadSecureStore();
+  const clusterPort = existsSync(pgdata) ? readClusterPort(pgdata) : null;
+  const ports = [...new Set([store.dbPort, clusterPort, ...PORT_CANDIDATES].filter((p): p is number => !!p && p > 0))];
+
+  if (existsSync(pgdata)) {
+    const pid = readPostmasterPid(pgdata);
+    if (pid) await killProcessByPid(pid);
+    await stopPostgresCluster(pgdata);
+  }
+
+  await killListenersOnPorts(ports);
+  await sleep(1500);
+
+  const deadline = Date.now() + 45_000;
+  while (Date.now() < deadline) {
+    let listening = false;
+    for (const port of ports) {
+      if (await isPortListening(port)) {
+        listening = true;
+        break;
+      }
+    }
+    if (!listening) break;
+    await killListenersOnPorts(ports);
+    if (existsSync(pgdata)) await stopPostgresCluster(pgdata);
+    await sleep(1500);
+  }
+
+  if (existsSync(pgdata)) await removeStalePidFile(pgdata);
+};
+
 export const resetPostgresData = async (): Promise<void> => {
   const base = getAppDataDir();
   const pgdata = join(base, 'pgdata');
   if (!existsSync(pgdata)) return;
 
-  await stopPostgresCluster(pgdata);
+  await forceStopPostgres();
 
   const stamp = Date.now();
   const failedPath = join(base, `pgdata.failed.${stamp}`);
 
-  for (let attempt = 0; attempt < 6; attempt++) {
+  for (let attempt = 0; attempt < 10; attempt++) {
     try {
       renameSync(pgdata, failedPath);
       return;
     } catch {
-      await stopPostgresCluster(pgdata);
-      await sleep(1000 * (attempt + 1));
+      await forceStopPostgres();
+      await sleep(1500 * (attempt + 1));
     }
   }
 
   try {
-    rmSync(pgdata, { recursive: true, force: true, maxRetries: 5, retryDelay: 1000 });
+    rmSync(pgdata, { recursive: true, force: true, maxRetries: 8, retryDelay: 1500 });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(
-      `Could not remove local database folder (still in use). Close InsureCRM Desktop, end any postgres.exe in Task Manager, then retry.\n\n${message}`
+      `Could not remove local database folder (still in use). Close InsureCRM Desktop fully, end any postgres.exe in Task Manager, then retry.\n\n${message}`
     );
   }
 };
