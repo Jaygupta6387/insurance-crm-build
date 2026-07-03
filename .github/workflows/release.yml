@@ -62,7 +62,9 @@ jobs:
 
       - name: Bundle PostgreSQL (macOS)
         if: matrix.platform == 'mac'
-        run: node scripts/bundle-postgresql.mjs --platform mac
+        run: |
+          brew install postgresql@16
+          node scripts/bundle-postgresql.mjs --platform mac
 
       - name: Verify CRM bundle before packaging
         run: node scripts/verify-crm-bundle.mjs

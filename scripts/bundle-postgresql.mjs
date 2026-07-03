@@ -242,7 +242,17 @@ const bundleFromHomebrew = () => {
   }
 
   if (!prefix) {
-    throw new Error('Homebrew PostgreSQL not found (install with: brew install postgresql@16)');
+    if (process.env.CI === 'true') {
+      console.log('CI: installing postgresql@16 via Homebrew...');
+      execSync('brew install postgresql@16', { stdio: 'inherit' });
+      prefix = execSync('brew --prefix postgresql@16', { encoding: 'utf8' }).trim();
+    }
+  }
+
+  if (!prefix || !existsSync(join(prefix, 'bin', 'pg_ctl'))) {
+    throw new Error(
+      'Homebrew PostgreSQL not found. Install with: brew install postgresql@16 (macOS CI installs this automatically)',
+    );
   }
 
   rmSync(destDir, { recursive: true, force: true });
