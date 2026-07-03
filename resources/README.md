@@ -4,14 +4,18 @@
 
 The setup wizard runs a **local** PostgreSQL instance on port `54329`. The installer must include PostgreSQL tools, or the user must have PostgreSQL installed.
 
-### Option A — Bundle portable binaries (recommended for clients)
+### Option A — Bundle portable binaries (required for macOS client builds)
 
-Place binaries before `npm run dist:win` / `npm run dist:mac`:
+Before `npm run dist:mac` / `npm run dist:win`, run:
+
+```bash
+npm run bundle:postgresql:mac   # or bundle:postgresql:win
+```
+
+This downloads official PostgreSQL 16 portable binaries and relinks macOS libraries so clients do **not** need Homebrew PostgreSQL installed.
 
 - `postgresql-win/bin/` — `pg_ctl.exe`, `initdb.exe`, `psql.exe`, and dependent DLLs
-- `postgresql-mac/bin/` — `pg_ctl`, `initdb`, `psql`, etc.
-
-Download Windows binaries: https://www.enterprisedb.com/download-postgresql-binaries (PostgreSQL 16 zip, extract `bin/` into `resources/postgresql-win/bin/`).
+- `postgresql-mac/bin/` — `pg_ctl`, `initdb`, `psql`, etc. (self-contained, no `/opt/homebrew` paths)
 
 ### Option B — System PostgreSQL (development / IT-managed PCs)
 

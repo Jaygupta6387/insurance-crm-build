@@ -307,11 +307,26 @@ const pgRuntimeEnv = (pgCtl: string, dataDir: string): NodeJS.ProcessEnv => {
   const pathKey = process.platform === 'win32' ? 'Path' : 'PATH';
   const pathSep = process.platform === 'win32' ? ';' : ':';
   const existingPath = process.env[pathKey] || '';
-  return sanitizeProcessEnv({
+
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     PGDATA: dataDir,
     [pathKey]: `${pgBinDir}${pathSep}${pgRoot}${pathSep}${existingPath}`,
-  });
+  };
+
+  if (process.platform === 'darwin') {
+    const libDir = join(pgRoot, 'lib');
+    const pgLibDir = join(libDir, 'postgresql');
+    const dyldParts = [libDir, pgLibDir].filter((p) => existsSync(p));
+    if (dyldParts.length) {
+      const existing = process.env.DYLD_LIBRARY_PATH || '';
+      env.DYLD_LIBRARY_PATH = existing
+        ? `${dyldParts.join(':')}:${existing}`
+        : dyldParts.join(':');
+    }
+  }
+
+  return sanitizeProcessEnv(env);
 };
 
 const runPgAsync = (

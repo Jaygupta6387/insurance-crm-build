@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 /**
- * Downloads PostgreSQL 16 portable binaries into resources/ for production builds.
+ * Bundles portable PostgreSQL 16 binaries into resources/ for production builds.
+ * Mac binaries are relinked so they do NOT depend on Homebrew paths on client machines.
+ *
  * Usage: node scripts/bundle-postgresql.mjs --platform win|mac
  */
 import { execSync } from 'child_process';
-import { createWriteStream, existsSync, mkdirSync, cpSync, rmSync, readdirSync } from 'fs';
-import { join, dirname } from 'path';
+import { createWriteStream, existsSync, mkdirSync, cpSync, rmSync, readdirSync, statSync, chmodSync } from 'fs';
+import { join, dirname, basename } from 'path';
 import { fileURLToPath } from 'url';
 import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
@@ -32,9 +34,18 @@ const destDir = join(RESOURCES, destName);
 
 const download = async (url, destFile) => {
   console.log(`Downloading ${url}`);
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Download failed: ${res.status} ${url}`);
-  await pipeline(Readable.fromWeb(res.body), createWriteStream(destFile));
+  try {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'InsureCRM-Desktop-Build/1.0' },
+      redirect: 'follow',
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    await pipeline(Readable.fromWeb(res.body), createWriteStream(destFile));
+    return;
+  } catch (fetchErr) {
+    console.warn(`fetch download failed (${fetchErr.message}), trying curl...`);
+  }
+  execSync(`curl -fsSL -A "Mozilla/5.0" -o "${destFile}" "${url}"`, { stdio: 'inherit' });
 };
 
 const extractZip = (zipPath, outDir) => {
@@ -42,7 +53,7 @@ const extractZip = (zipPath, outDir) => {
   if (process.platform === 'win32') {
     execSync(
       `powershell -NoProfile -Command "Expand-Archive -Path '${zipPath.replace(/'/g, "''")}' -DestinationPath '${outDir.replace(/'/g, "''")}' -Force"`,
-      { stdio: 'inherit' }
+      { stdio: 'inherit' },
     );
   } else {
     execSync(`unzip -qo "${zipPath}" -d "${outDir}"`, { stdio: 'inherit' });
@@ -65,8 +76,157 @@ const copyTree = (src, dest) => {
   cpSync(src, dest, { recursive: true });
 };
 
+const listFilesRecursive = (dir) => {
+  const files = [];
+  if (!existsSync(dir)) return files;
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    const st = statSync(full);
+    if (st.isDirectory()) files.push(...listFilesRecursive(full));
+    else files.push(full);
+  }
+  return files;
+};
+
+const isMachO = (filePath) => {
+  try {
+    const out = execSync(`file -b "${filePath}"`, { encoding: 'utf8' }).trim();
+    return out.includes('Mach-O');
+  } catch {
+    return false;
+  }
+};
+
+const collectLibBasenames = (libRoot) => {
+  const names = new Set();
+  for (const file of listFilesRecursive(libRoot)) {
+    if (file.endsWith('.dylib') || file.endsWith('.so')) {
+      names.add(basename(file));
+    }
+  }
+  return names;
+};
+
+const resolveLocalLib = (libRoot, depBase) => {
+  const direct = join(libRoot, depBase);
+  if (existsSync(direct)) return direct;
+  const nested = join(libRoot, 'postgresql', depBase);
+  if (existsSync(nested)) return nested;
+  for (const file of listFilesRecursive(libRoot)) {
+    if (basename(file) === depBase) return file;
+  }
+  return null;
+};
+
+/** Copy non-system dylibs referenced by bundled binaries into lib/ (e.g. icu4c, gettext). */
+const copyExternalDeps = (bundleRoot) => {
+  const libRoot = join(bundleRoot, 'lib');
+  const binDir = join(bundleRoot, 'bin');
+  mkdirSync(libRoot, { recursive: true });
+
+  let copied = 0;
+  for (let pass = 0; pass < 5; pass += 1) {
+    const scanTargets = [
+      ...listFilesRecursive(binDir),
+      ...listFilesRecursive(libRoot).filter((f) => f.endsWith('.dylib')),
+    ];
+    let passCopied = 0;
+
+    for (const file of scanTargets) {
+      if (!isMachO(file)) continue;
+      let otoolOut = '';
+      try {
+        otoolOut = execSync(`otool -L "${file}"`, { encoding: 'utf8' });
+      } catch {
+        continue;
+      }
+
+      for (const line of otoolOut.split('\n').slice(1)) {
+        const match = line.trim().match(/^(\/[^\s]+)\s/);
+        if (!match) continue;
+        const dep = match[1];
+        if (dep.startsWith('/usr/lib') || dep.startsWith('/System/')) continue;
+
+        const depBase = basename(dep);
+        const dest = join(libRoot, depBase);
+        if (!existsSync(dest) && existsSync(dep)) {
+          cpSync(dep, dest);
+          passCopied += 1;
+          console.log(`  copied: ${depBase}`);
+        }
+      }
+    }
+
+    copied += passCopied;
+    if (passCopied === 0) break;
+  }
+
+  console.log(`Copied ${copied} external dylib(s) into bundle`);
+};
+
+/** Rewrite absolute dylib paths to bundled @executable_path/../lib (bin) or @loader_path (lib). */
+const relinkMacPostgres = (bundleRoot) => {
+  if (process.platform !== 'darwin') return;
+
+  const binDir = join(bundleRoot, 'bin');
+  const libRoot = join(bundleRoot, 'lib');
+  if (!existsSync(binDir) || !existsSync(libRoot)) {
+    throw new Error(`Missing bin/ or lib/ under ${bundleRoot}`);
+  }
+
+  const libNames = collectLibBasenames(libRoot);
+  let changes = 0;
+
+  const relinkFile = (filePath, loaderKind) => {
+    if (!isMachO(filePath)) return;
+    let otoolOut = '';
+    try {
+      otoolOut = execSync(`otool -L "${filePath}"`, { encoding: 'utf8' });
+    } catch {
+      return;
+    }
+
+    const prefix = loaderKind === 'bin' ? '@executable_path/../lib' : '@loader_path';
+
+    for (const line of otoolOut.split('\n').slice(1)) {
+      const trimmed = line.trim();
+      const match = trimmed.match(/^(\/[^\s]+)\s/);
+      if (!match) continue;
+      const dep = match[1];
+      if (dep.startsWith('/usr/lib') || dep.startsWith('/System/')) continue;
+
+      const depBase = basename(dep);
+      if (!libNames.has(depBase) && !resolveLocalLib(libRoot, depBase)) continue;
+
+      const newPath = `${prefix}/${depBase}`;
+      if (dep === newPath) continue;
+
+      try {
+        execSync(`install_name_tool -change "${dep}" "${newPath}" "${filePath}"`, { stdio: 'pipe' });
+        changes += 1;
+        console.log(`  relink: ${basename(filePath)} ${depBase}`);
+      } catch (err) {
+        console.warn(`  skip relink ${filePath}: ${err.message}`);
+      }
+    }
+
+    try {
+      chmodSync(filePath, 0o755);
+    } catch {
+      // ignore
+    }
+  };
+
+  console.log('Relinking bundled PostgreSQL for portable macOS use...');
+  for (const file of listFilesRecursive(binDir)) relinkFile(file, 'bin');
+  for (const file of listFilesRecursive(libRoot)) {
+    if (file.endsWith('.dylib')) relinkFile(file, 'lib');
+  }
+  console.log(`Relink complete (${changes} dependency path(s) updated)`);
+};
+
 const bundleFromHomebrew = () => {
-  const formulas = ['postgresql@16', 'postgresql@15', 'postgresql@18', 'postgresql'];
+  const formulas = ['postgresql@16', 'postgresql@18', 'postgresql@15', 'postgresql'];
   let prefix = '';
 
   for (const formula of formulas) {
@@ -85,6 +245,7 @@ const bundleFromHomebrew = () => {
     throw new Error('Homebrew PostgreSQL not found (install with: brew install postgresql@16)');
   }
 
+  rmSync(destDir, { recursive: true, force: true });
   mkdirSync(destDir, { recursive: true });
   for (const dir of ['bin', 'lib', 'share']) {
     const src = join(prefix, dir);
@@ -124,6 +285,20 @@ const verify = () => {
     throw new Error(`Missing ${pgCtl} after bundle`);
   }
   console.log(`Verified ${pgCtl}`);
+
+  if (platform === 'mac') {
+    const initdb = join(destDir, 'bin', 'initdb');
+    const out = execSync(`otool -L "${initdb}"`, { encoding: 'utf8' });
+    const bad = out
+      .split('\n')
+      .filter((line) => line.includes('/opt/homebrew/') || line.includes('/usr/local/opt/'));
+    if (bad.length) {
+      console.warn('Warning: initdb still references Homebrew paths:');
+      bad.forEach((line) => console.warn(`  ${line.trim()}`));
+    } else {
+      console.log('initdb has no Homebrew dylib dependencies');
+    }
+  }
 };
 
 const main = async () => {
@@ -132,13 +307,15 @@ const main = async () => {
   if (platform === 'win') {
     await bundleFromZip(URLS.win);
   } else if (platform === 'mac') {
+    const url = process.arch === 'x64' ? URLS.mac_x64 : URLS.mac;
     try {
-      bundleFromHomebrew();
-    } catch (brewErr) {
-      console.warn(`Homebrew bundle failed: ${brewErr.message}`);
-      const url = process.arch === 'x64' ? URLS.mac_x64 : URLS.mac;
       await bundleFromZip(url);
+    } catch (zipErr) {
+      console.warn(`Portable zip bundle failed: ${zipErr.message}`);
+      bundleFromHomebrew();
     }
+    copyExternalDeps(destDir);
+    relinkMacPostgres(destDir);
   } else {
     throw new Error(`Unsupported platform: ${platform}`);
   }
