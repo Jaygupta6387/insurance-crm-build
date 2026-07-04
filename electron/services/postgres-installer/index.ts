@@ -13,6 +13,7 @@ import {
   rmSync,
   renameSync,
   lstatSync,
+  symlinkSync,
 } from 'fs';
 import { join, dirname } from 'path';
 import net from 'net';
@@ -518,6 +519,49 @@ const removeStalePidFile = async (dataDir: string): Promise<void> => {
   }
 };
 
+const resolveInitdbShareDir = (pgCtl: string): string | null => {
+  const pgRoot = dirname(dirname(pgCtl));
+  const shareRoot = join(pgRoot, 'share');
+  const directCandidates = [
+    shareRoot,
+    join(shareRoot, 'postgresql'),
+    join(shareRoot, 'postgresql@18'),
+    join(shareRoot, 'postgresql@17'),
+    join(shareRoot, 'postgresql@16'),
+    join(shareRoot, 'postgresql@15'),
+  ];
+
+  for (const candidate of directCandidates) {
+    if (existsSync(join(candidate, 'postgres.bki'))) return candidate;
+  }
+
+  if (!existsSync(shareRoot)) return null;
+  try {
+    for (const entry of readdirSync(shareRoot)) {
+      const candidate = join(shareRoot, entry);
+      if (existsSync(join(candidate, 'postgres.bki'))) return candidate;
+    }
+  } catch {
+    // fall through
+  }
+
+  return null;
+};
+
+const ensureMacShareCompatibilityLink = (pgCtl: string): void => {
+  if (process.platform !== 'darwin') return;
+  const shareDir = resolveInitdbShareDir(pgCtl);
+  if (!shareDir) return;
+
+  const compatPath = '/tmp/insurecrm-pgshare';
+  try {
+    rmSync(compatPath, { recursive: true, force: true });
+    symlinkSync(shareDir, compatPath, 'dir');
+  } catch {
+    // If this fails, initdb/start will surface the concrete PostgreSQL error.
+  }
+};
+
 const runInitdb = async (
   initdb: string,
   pgCtl: string,
@@ -543,6 +587,11 @@ const runInitdb = async (
     '--pwfile',
     pwFile,
   ];
+  const shareDir = resolveInitdbShareDir(pgCtl);
+  if (shareDir) {
+    initArgs.push('-L', shareDir);
+  }
+  ensureMacShareCompatibilityLink(pgCtl);
 
   try {
     const result = await runPgAsync(initdb, initArgs, {
@@ -824,6 +873,7 @@ export const installPostgres = async (
         : 'Install PostgreSQL via Homebrew (`brew install postgresql@16`) or bundle binaries in resources/postgresql-mac/.';
     throw new Error(`PostgreSQL was not found on this computer. ${help}`);
   }
+  ensureMacShareCompatibilityLink(pgCtl);
 
   const runningPort = await isOurClusterRunning(config.dataDir, pgCtl);
   if (runningPort) {
@@ -877,6 +927,7 @@ export const ensurePostgresRunning = async (
       'PostgreSQL is not available in this install. Reinstall InsureCRM Desktop or run setup again.'
     );
   }
+  ensureMacShareCompatibilityLink(pgCtl);
 
   if (!isClusterInitialized(config.dataDir)) {
     throw new Error('Local database has not been set up. Complete setup in InsureCRM Desktop.');

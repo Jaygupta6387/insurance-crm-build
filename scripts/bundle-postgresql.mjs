@@ -17,6 +17,8 @@ import {
   chmodSync,
   copyFileSync,
   realpathSync,
+  readFileSync,
+  writeFileSync,
 } from 'fs';
 import { join, dirname, basename } from 'path';
 import { fileURLToPath } from 'url';
@@ -267,6 +269,49 @@ const relinkMacPostgres = (bundleRoot) => {
   console.log(`Relink complete (${changes} dependency path(s) updated)`);
 };
 
+const patchMacPostgresSharePath = (bundleRoot) => {
+  if (process.platform !== 'darwin') return;
+
+  const replacement = '/tmp/insurecrm-pgshare';
+  const candidates = [
+    '/opt/homebrew/opt/postgresql@18/share/postgresql@18',
+    '/opt/homebrew/opt/postgresql@17/share/postgresql@17',
+    '/opt/homebrew/opt/postgresql@16/share/postgresql@16',
+    '/opt/homebrew/opt/postgresql@15/share/postgresql@15',
+    '/usr/local/opt/postgresql@18/share/postgresql@18',
+    '/usr/local/opt/postgresql@17/share/postgresql@17',
+    '/usr/local/opt/postgresql@16/share/postgresql@16',
+    '/usr/local/opt/postgresql@15/share/postgresql@15',
+  ];
+
+  let patched = 0;
+  for (const file of listFilesRecursive(bundleRoot)) {
+    if (!isMachO(file)) continue;
+    let data = readFileSync(file);
+    let changed = false;
+
+    for (const oldPath of candidates) {
+      const oldBuf = Buffer.from(oldPath, 'utf8');
+      const idx = data.indexOf(oldBuf);
+      if (idx === -1) continue;
+      if (replacement.length > oldPath.length) {
+        throw new Error(`Replacement PostgreSQL share path is too long: ${replacement}`);
+      }
+      const newBuf = Buffer.alloc(oldPath.length);
+      newBuf.write(replacement, 'utf8');
+      data = Buffer.concat([data.subarray(0, idx), newBuf, data.subarray(idx + oldBuf.length)]);
+      changed = true;
+    }
+
+    if (changed) {
+      writeFileSync(file, data);
+      patched += 1;
+      console.log(`  patched share path: ${basename(file)}`);
+    }
+  }
+  console.log(`Patched PostgreSQL share path in ${patched} Mach-O file(s)`);
+};
+
 const signMacPostgres = (bundleRoot) => {
   if (process.platform !== 'darwin') return;
 
@@ -367,6 +412,16 @@ const verify = () => {
     } else {
       console.log('initdb has no Homebrew dylib dependencies');
     }
+
+    const postgres = join(destDir, 'bin', 'postgres');
+    const stringsOut = execSync(`strings "${postgres}"`, { encoding: 'utf8' });
+    const badSharePath = stringsOut
+      .split('\n')
+      .find((line) => /\/(opt\/homebrew|usr\/local)\/opt\/postgresql@\d+\/share\/postgresql@\d+/.test(line));
+    if (badSharePath) {
+      throw new Error(`postgres still references Homebrew share path: ${badSharePath}`);
+    }
+    console.log('postgres has no Homebrew share path dependency');
   }
 };
 
@@ -385,6 +440,7 @@ const main = async () => {
     }
     copyExternalDeps(destDir);
     relinkMacPostgres(destDir);
+    patchMacPostgresSharePath(destDir);
     signMacPostgres(destDir);
   } else {
     throw new Error(`Unsupported platform: ${platform}`);
