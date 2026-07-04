@@ -12,6 +12,8 @@ dist/
 resources/postgresql-win/
 resources/postgresql-mac/
 
+.crm-bundle/
+
 packages/crm-backend/node_modules/
 packages/crm-backend/logs/
 packages/crm-backend/.env

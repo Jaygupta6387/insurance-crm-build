@@ -9,6 +9,7 @@ export interface DesktopApi {
   requestTransfer: (payload: { reason: string; new_device_name: string }) => Promise<unknown>;
   heartbeat: () => Promise<unknown>;
   openExternal: (url: string) => Promise<void>;
+  selectDocumentRoot: () => Promise<{ canceled: boolean; path?: string }>;
   clearStore: () => Promise<void>;
   resetForNewLicense: () => Promise<{ success: boolean }>;
   onAppState: (cb: (state: string) => void) => () => void;
@@ -27,6 +28,7 @@ const api: DesktopApi = {
   requestTransfer: (payload) => ipcRenderer.invoke('license:transfer', payload),
   heartbeat: () => ipcRenderer.invoke('license:heartbeat'),
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
+  selectDocumentRoot: () => ipcRenderer.invoke('dialog:select-document-root'),
   clearStore: () => ipcRenderer.invoke('store:clear'),
   resetForNewLicense: () => ipcRenderer.invoke('store:reset-for-new-license'),
   onAppState: (cb) => {

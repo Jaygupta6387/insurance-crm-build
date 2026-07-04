@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import { loadSecureStore, saveSecureStore, clearSecureStore } from './services/secure-store.service';
@@ -347,6 +347,18 @@ ipcMain.handle('license:heartbeat', async () => {
 });
 
 ipcMain.handle('app:openExternal', (_e, url: string) => shell.openExternal(url));
+
+ipcMain.handle('dialog:select-document-root', async () => {
+  if (!mainWindow) throw new Error('Application window is not ready');
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Choose InsureCRM Document Storage Folder',
+    properties: ['openDirectory', 'createDirectory'],
+  });
+  return {
+    canceled: result.canceled,
+    path: result.filePaths[0],
+  };
+});
 
 ipcMain.handle('store:clear', () => {
   clearSecureStore();

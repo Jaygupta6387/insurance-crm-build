@@ -15,14 +15,14 @@ extraResources:
     to: resources/
     filter:
       - "**/*"
-  - from: packages/crm-backend
+  - from: .crm-bundle/backend
     to: crm-backend
     filter:
       - "**/*"
       - "!logs/**"
       - "!**/.env"
       - "!**/.env.*"
-  - from: packages/crm-frontend/dist
+  - from: .crm-bundle/frontend/dist
     to: crm-frontend/dist
 
 publish:

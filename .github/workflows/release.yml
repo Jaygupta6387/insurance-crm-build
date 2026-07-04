@@ -28,8 +28,22 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - name: Checkout
+      - name: Checkout desktop release shell
         uses: actions/checkout@v4
+
+      - name: Checkout CRM backend source
+        uses: actions/checkout@v4
+        with:
+          repository: Jaygupta6387/InsureCRM-Backend
+          path: crm-app/backend
+          token: ${{ secrets.CRM_SOURCE_TOKEN }}
+
+      - name: Checkout CRM frontend source
+        uses: actions/checkout@v4
+        with:
+          repository: Jaygupta6387/InsureCRM-Frontend
+          path: crm-app/frontend
+          token: ${{ secrets.CRM_SOURCE_TOKEN }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -40,20 +54,12 @@ jobs:
       - name: Install root dependencies
         run: npm ci
 
-      - name: Install CRM backend dependencies
-        working-directory: packages/crm-backend
-        run: |
-          npm ci
-          npx prisma generate --schema=prisma/company.prisma
-          npx prisma generate --schema=prisma/superadmin.prisma
+      - name: Sync CRM app into bundle
+        env:
+          CRM_APP_PATH: crm-app
+        run: node scripts/sync-crm-app.mjs
 
-      - name: Build CRM frontend
-        working-directory: packages/crm-frontend
-        run: |
-          npm ci
-          npm run build
-
-      - name: Build Electron app
+      - name: Build Electron shell
         run: npm run build
 
       - name: Bundle PostgreSQL (Windows)

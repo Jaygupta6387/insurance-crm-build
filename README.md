@@ -1,59 +1,59 @@
-# InsureCRM Desktop
+# InsureCRM Desktop — Release Shell
 
-Electron desktop app for InsureCRM — local PostgreSQL, cloud license activation, and bundled CRM.
+Electron installer for InsureCRM. **All CRM features live in the app source repos** — this repo only bundles, licenses, and ships the desktop app.
 
-## Requirements
+See [ARCHITECTURE.md](../ARCHITECTURE.md) for the full split.
 
-- Node.js 20+
-- macOS or Windows for development
+## What this repo contains
+
+- Electron main/preload (license, PostgreSQL setup, auto-update)
+- Build scripts (`sync-crm-app.mjs`, PostgreSQL bundler)
+- GitHub Actions → DMG + EXE to [insurance-crm-build](https://github.com/Jaygupta6387/insurance-crm-build/releases)
+
+## What this repo does NOT contain
+
+- CRM feature development (use `InsureCRM-Backend` and `InsureCRM-Frontend`)
+- Duplicate logic in `packages/crm-*` (deprecated — use sync pipeline)
 
 ## Development
 
 ```bash
 npm install
-cd packages/crm-backend && npm install && npx prisma generate --schema=prisma/company.prisma
-cd ../crm-frontend && npm install
-cd ../..
+# Run New-CRM 2/backend + New-CRM 2/frontend separately, or:
 npm run dev
 ```
+
+Dev mode loads CRM from `../New-CRM 2/` automatically.
 
 ## Build installers
 
 ```bash
-# macOS (on Mac)
-npm run dist:mac
-
-# Windows (on Windows, or via GitHub Actions)
-npm run dist:win
+npm run dist:mac   # macOS
+npm run dist:win   # Windows
 ```
 
-## Auto-update
+Runs `sync:crm` first (copies + builds backend/frontend into `.crm-bundle/`), then packages Electron.
 
-The app checks [GitHub Releases](https://github.com/Jaygupta6387/insurance-crm-build/releases) for updates.
+## Publish release
 
-When a new version is published, users see:
-
-1. **Update available** — downloading in the background
-2. **Update ready — click here to restart and update** — installs on click
-
-### Publish a new release
-
-1. Bump `version` in `package.json`
-2. Commit and push to `main`
-3. Create and push a tag:
+1. Push app source to GitHub:
+   - `Jaygupta6387/InsureCRM-Backend`
+   - `Jaygupta6387/InsureCRM-Frontend`
+2. Bump `version` in `package.json`
+3. Tag and push:
 
 ```bash
-git tag v1.0.1
-git push origin v1.0.1
+git tag v1.3.0
+git push origin v1.3.0
 ```
 
-GitHub Actions builds Windows + macOS installers and uploads them to the release.
+CI checks out both private app repos using `CRM_SOURCE_TOKEN`, syncs CRM, builds Mac + Windows, publishes to GitHub Releases.
 
-## License cloud API
+## License API
 
-Production builds use `https://super-admin-panel-crm-backend.onrender.com/api` for license activation.
+Production: `https://super-admin-panel-crm-backend.onrender.com/api`
 
-Override locally with:
+Local override:
 
 ```bash
 export LICENSE_CLOUD_API_URL=http://localhost:5001/api
