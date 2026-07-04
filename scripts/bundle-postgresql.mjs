@@ -6,7 +6,18 @@
  * Usage: node scripts/bundle-postgresql.mjs --platform win|mac
  */
 import { execSync } from 'child_process';
-import { createWriteStream, existsSync, mkdirSync, cpSync, rmSync, readdirSync, statSync, chmodSync } from 'fs';
+import {
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  cpSync,
+  rmSync,
+  readdirSync,
+  statSync,
+  chmodSync,
+  copyFileSync,
+  realpathSync,
+} from 'fs';
 import { join, dirname, basename } from 'path';
 import { fileURLToPath } from 'url';
 import { pipeline } from 'stream/promises';
@@ -123,6 +134,22 @@ const resolveLocalLib = (libRoot, depBase) => {
   return null;
 };
 
+const findExternalLib = (depBase) => {
+  const roots = ['/opt/homebrew/lib', '/usr/local/lib'];
+  for (const optRoot of ['/opt/homebrew/opt', '/usr/local/opt']) {
+    if (!existsSync(optRoot)) continue;
+    for (const formula of readdirSync(optRoot)) {
+      roots.push(join(optRoot, formula, 'lib'));
+    }
+  }
+
+  for (const root of roots) {
+    const candidate = join(root, depBase);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+};
+
 /** Copy non-system dylibs referenced by bundled binaries into lib/ (e.g. icu4c, gettext). */
 const copyExternalDeps = (bundleRoot) => {
   const libRoot = join(bundleRoot, 'lib');
@@ -147,15 +174,25 @@ const copyExternalDeps = (bundleRoot) => {
       }
 
       for (const line of otoolOut.split('\n').slice(1)) {
-        const match = line.trim().match(/^(\/[^\s]+)\s/);
+        const match = line.trim().match(/^([^\s]+)\s/);
         if (!match) continue;
         const dep = match[1];
         if (dep.startsWith('/usr/lib') || dep.startsWith('/System/')) continue;
 
         const depBase = basename(dep);
         const dest = join(libRoot, depBase);
-        if (!existsSync(dest) && existsSync(dep)) {
-          cpSync(dep, dest, { dereference: true });
+        const source =
+          dep.startsWith('/')
+            ? dep
+            : dep.startsWith('@loader_path/')
+              ? (existsSync(join(dirname(file), dep.replace('@loader_path/', '')))
+                  ? join(dirname(file), dep.replace('@loader_path/', ''))
+                  : findExternalLib(depBase))
+              : dep.startsWith('@rpath/')
+                ? findExternalLib(depBase)
+                : null;
+        if (!existsSync(dest) && source && existsSync(source)) {
+          copyFileSync(realpathSync(source), dest);
           passCopied += 1;
           console.log(`  copied: ${depBase}`);
         }
