@@ -73,7 +73,7 @@ const findPgsqlRoot = (extractedDir) => {
 };
 
 const copyTree = (src, dest) => {
-  cpSync(src, dest, { recursive: true });
+  cpSync(src, dest, { recursive: true, dereference: true });
 };
 
 const listFilesRecursive = (dir) => {
@@ -81,7 +81,12 @@ const listFilesRecursive = (dir) => {
   if (!existsSync(dir)) return files;
   for (const entry of readdirSync(dir)) {
     const full = join(dir, entry);
-    const st = statSync(full);
+    let st;
+    try {
+      st = statSync(full);
+    } catch {
+      continue;
+    }
     if (st.isDirectory()) files.push(...listFilesRecursive(full));
     else files.push(full);
   }
@@ -150,7 +155,7 @@ const copyExternalDeps = (bundleRoot) => {
         const depBase = basename(dep);
         const dest = join(libRoot, depBase);
         if (!existsSync(dest) && existsSync(dep)) {
-          cpSync(dep, dest);
+          cpSync(dep, dest, { dereference: true });
           passCopied += 1;
           console.log(`  copied: ${depBase}`);
         }

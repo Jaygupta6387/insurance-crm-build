@@ -12,7 +12,7 @@ import {
   unlinkSync,
   rmSync,
   renameSync,
-  statSync,
+  lstatSync,
 } from 'fs';
 import { join, dirname } from 'path';
 import net from 'net';
@@ -224,7 +224,13 @@ const chmodRecursive = (root: string): void => {
   if (!existsSync(root)) return;
   for (const entry of readdirSync(root)) {
     const full = join(root, entry);
-    const stat = statSync(full);
+    let stat;
+    try {
+      stat = lstatSync(full);
+    } catch {
+      continue;
+    }
+    if (stat.isSymbolicLink()) continue;
     if (stat.isDirectory()) {
       chmodRecursive(full);
       continue;
