@@ -43,7 +43,6 @@ mac:
   target:
     - target: dmg
       arch:
-        - x64
         - arm64
   artifactName: InsureCRM-Desktop-${version}-${arch}.${ext}
   category: public.app-category.business
