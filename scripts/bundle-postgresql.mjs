@@ -230,6 +230,23 @@ const relinkMacPostgres = (bundleRoot) => {
   console.log(`Relink complete (${changes} dependency path(s) updated)`);
 };
 
+const signMacPostgres = (bundleRoot) => {
+  if (process.platform !== 'darwin') return;
+
+  console.log('Ad-hoc signing bundled PostgreSQL binaries...');
+  let signed = 0;
+  for (const file of listFilesRecursive(bundleRoot)) {
+    if (!isMachO(file)) continue;
+    try {
+      execSync(`codesign --force --sign - "${file}"`, { stdio: 'pipe' });
+      signed += 1;
+    } catch (err) {
+      console.warn(`  codesign failed for ${file}: ${err.message}`);
+    }
+  }
+  console.log(`Signed ${signed} PostgreSQL Mach-O file(s)`);
+};
+
 const bundleFromHomebrew = () => {
   const formulas = ['postgresql@16', 'postgresql@18', 'postgresql@15', 'postgresql'];
   let prefix = '';
@@ -331,6 +348,7 @@ const main = async () => {
     }
     copyExternalDeps(destDir);
     relinkMacPostgres(destDir);
+    signMacPostgres(destDir);
   } else {
     throw new Error(`Unsupported platform: ${platform}`);
   }
