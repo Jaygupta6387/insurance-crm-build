@@ -1,7 +1,19 @@
 import { randomBytes } from 'crypto';
-import { spawn, execFile } from 'child_process';
+import { spawn, execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync, rmSync, renameSync } from 'fs';
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+  unlinkSync,
+  rmSync,
+  renameSync,
+  statSync,
+} from 'fs';
 import { join, dirname } from 'path';
 import net from 'net';
 import { app } from 'electron';
@@ -198,21 +210,82 @@ export const resetPostgresData = async (): Promise<void> => {
     rmSync(pgdata, { recursive: true, force: true, maxRetries: 8, retryDelay: 1500 });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    const closeHint =
+      process.platform === 'win32'
+        ? 'Close InsureCRM Desktop fully, end any postgres.exe in Task Manager, then retry.'
+        : 'Close InsureCRM Desktop fully, end any postgres process in Activity Monitor, then retry.';
     throw new Error(
-      `Could not remove local database folder (still in use). Close InsureCRM Desktop fully, end any postgres.exe in Task Manager, then retry.\n\n${message}`
+      `Could not remove local database folder (still in use). ${closeHint}\n\n${message}`
     );
   }
 };
 
+const chmodRecursive = (root: string): void => {
+  if (!existsSync(root)) return;
+  for (const entry of readdirSync(root)) {
+    const full = join(root, entry);
+    const stat = statSync(full);
+    if (stat.isDirectory()) {
+      chmodRecursive(full);
+      continue;
+    }
+    if (full.includes('/bin/') || full.endsWith('.dylib') || full.endsWith('.so')) {
+      try {
+        chmodSync(full, 0o755);
+      } catch {
+        // best effort
+      }
+    }
+  }
+};
+
+const stripMacQuarantine = (root: string): void => {
+  if (process.platform !== 'darwin') return;
+  try {
+    execFileSync('/usr/bin/xattr', ['-dr', 'com.apple.quarantine', root], { stdio: 'ignore' });
+  } catch {
+    // The app can still run if xattr is unavailable or the attribute is absent.
+  }
+};
+
+const prepareMacBundledPgRoot = (sourceRoot: string, platform: string): string => {
+  if (process.platform !== 'darwin' || !app.isPackaged) return sourceRoot;
+
+  const version = app.getVersion?.() || 'unknown';
+  const runtimeRoot = join(getAppDataDir(), 'runtime', `${platform}-${version}`);
+  const marker = join(runtimeRoot, '.ready');
+
+  if (!existsSync(marker) || !existsSync(join(runtimeRoot, 'bin', 'pg_ctl'))) {
+    rmSync(runtimeRoot, { recursive: true, force: true });
+    mkdirSync(dirname(runtimeRoot), { recursive: true });
+    cpSync(sourceRoot, runtimeRoot, { recursive: true });
+    chmodRecursive(runtimeRoot);
+    stripMacQuarantine(runtimeRoot);
+    writeFileSync(marker, new Date().toISOString(), 'utf8');
+  }
+
+  return runtimeRoot;
+};
+
 const bundledPgBin = (bin: string): string | null => {
-  const platform = process.platform === 'win32' ? 'postgresql-win' : 'postgresql-mac';
+  const platforms =
+    process.platform === 'win32'
+      ? ['postgresql-win']
+      : [`postgresql-mac-${process.arch}`, 'postgresql-mac'];
   const candidates = [
-    join(process.resourcesPath, 'resources', platform, 'bin', bin),
-    join(process.resourcesPath, platform, 'bin', bin),
-    join(__dirname, '../../../resources', platform, 'bin', bin),
+    (platform: string) => join(process.resourcesPath, 'resources', platform),
+    (platform: string) => join(process.resourcesPath, platform),
+    (platform: string) => join(__dirname, '../../../resources', platform),
   ];
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) return candidate;
+
+  for (const platform of platforms) {
+    for (const getRoot of candidates) {
+      const root = getRoot(platform);
+      if (!existsSync(join(root, 'bin', bin))) continue;
+      const preparedRoot = prepareMacBundledPgRoot(root, platform);
+      const candidate = join(preparedRoot, 'bin', bin);
+      if (existsSync(candidate)) return candidate;
+    }
   }
   return null;
 };
@@ -611,9 +684,13 @@ const pickAvailablePort = async (): Promise<number> => {
 
 const buildStartFailureMessage = (port: number, dataDir: string, cause?: string): string => {
   const log = readRecentLog(dataDir);
+  const processHint =
+    process.platform === 'win32'
+      ? 'Close InsureCRM Desktop fully, end postgres.exe in Task Manager if needed, reopen and retry.'
+      : 'Close InsureCRM Desktop fully, end any postgres process in Activity Monitor if needed, reopen and retry.';
   const tips = [
     'Click "Reset database & retry" (stops PostgreSQL first, then recreates the folder).',
-    'Close InsureCRM Desktop fully, end postgres.exe in Task Manager if needed, reopen and retry.',
+    processHint,
     'Temporarily disable antivirus/firewall blocking local apps.',
     'Restart your computer and run setup again.',
   ];
@@ -666,7 +743,11 @@ const removeDataDirSafely = async (dataDir: string, pgCtl: string, onProgress: (
     }
   }
 
-  throw new Error('Could not remove old database folder — close the app, end postgres.exe in Task Manager, then retry.');
+  const processHint =
+    process.platform === 'win32'
+      ? 'end postgres.exe in Task Manager'
+      : 'end any postgres process in Activity Monitor';
+  throw new Error(`Could not remove old database folder — close the app, ${processHint}, then retry.`);
 };
 
 const startDedicatedCluster = async (

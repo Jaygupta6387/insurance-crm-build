@@ -375,8 +375,12 @@ ipcMain.handle('store:reset-for-new-license', async () => {
     return { success: true };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    const closeHint =
+      process.platform === 'win32'
+        ? 'open Task Manager, end all postgres.exe'
+        : 'open Activity Monitor, end any postgres process';
     throw new Error(
-      `${message}\n\nIf this keeps failing: close InsureCRM Desktop, open Task Manager, end all postgres.exe, then reopen the app and try again.`
+      `${message}\n\nIf this keeps failing: close InsureCRM Desktop, ${closeHint}, then reopen the app and try again.`
     );
   }
 });
