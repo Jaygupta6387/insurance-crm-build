@@ -20,7 +20,7 @@ import {
   readFileSync,
   writeFileSync,
 } from 'fs';
-import { join, dirname, basename } from 'path';
+import { join, dirname, basename, relative } from 'path';
 import { fileURLToPath } from 'url';
 import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
@@ -162,7 +162,7 @@ const copyExternalDeps = (bundleRoot) => {
   for (let pass = 0; pass < 5; pass += 1) {
     const scanTargets = [
       ...listFilesRecursive(binDir),
-      ...listFilesRecursive(libRoot).filter((f) => f.endsWith('.dylib')),
+      ...listFilesRecursive(libRoot).filter((f) => f.endsWith('.dylib') || f.endsWith('.so')),
     ];
     let passCopied = 0;
 
@@ -208,6 +208,21 @@ const copyExternalDeps = (bundleRoot) => {
   console.log(`Copied ${copied} external dylib(s) into bundle`);
 };
 
+const resolveRelinkPath = (filePath, libRoot, depBase, loaderKind) => {
+  if (loaderKind === 'bin') return `@executable_path/../lib/${depBase}`;
+
+  const depPath = resolveLocalLib(libRoot, depBase);
+  if (!depPath) return `@loader_path/${depBase}`;
+
+  const fileDir = dirname(filePath);
+  const depDir = dirname(depPath);
+  if (fileDir === depDir) return `@loader_path/${depBase}`;
+
+  const relDir = relative(fileDir, depDir);
+  if (!relDir || relDir === '.') return `@loader_path/${depBase}`;
+  return `@loader_path/${relDir}/${depBase}`;
+};
+
 /** Rewrite absolute dylib paths to bundled @executable_path/../lib (bin) or @loader_path (lib). */
 const relinkMacPostgres = (bundleRoot) => {
   if (process.platform !== 'darwin') return;
@@ -230,11 +245,9 @@ const relinkMacPostgres = (bundleRoot) => {
       return;
     }
 
-    const prefix = loaderKind === 'bin' ? '@executable_path/../lib' : '@loader_path';
-
     for (const line of otoolOut.split('\n').slice(1)) {
       const trimmed = line.trim();
-      const match = trimmed.match(/^(\/[^\s]+)\s/);
+      const match = trimmed.match(/^(\S+)\s/);
       if (!match) continue;
       const dep = match[1];
       if (dep.startsWith('/usr/lib') || dep.startsWith('/System/')) continue;
@@ -242,7 +255,7 @@ const relinkMacPostgres = (bundleRoot) => {
       const depBase = basename(dep);
       if (!libNames.has(depBase) && !resolveLocalLib(libRoot, depBase)) continue;
 
-      const newPath = `${prefix}/${depBase}`;
+      const newPath = resolveRelinkPath(filePath, libRoot, depBase, loaderKind);
       if (dep === newPath) continue;
 
       try {
@@ -501,6 +514,21 @@ const verify = () => {
       throw new Error(`postgres still references Homebrew lib path: ${badLibPath}`);
     }
     console.log('postgres has no Homebrew share/lib path dependency');
+
+    const plpgsql = join(destDir, 'lib', 'postgresql', 'plpgsql.dylib');
+    if (existsSync(plpgsql)) {
+      const plpgsqlDeps = execSync(`otool -L "${plpgsql}"`, { encoding: 'utf8' });
+      for (const line of plpgsqlDeps.split('\n').slice(1)) {
+        const depMatch = line.trim().match(/^(@loader_path\/\S+)\s/);
+        if (!depMatch) continue;
+        const depPath = depMatch[1].replace('@loader_path/', '');
+        const resolved = join(dirname(plpgsql), depPath);
+        if (!existsSync(resolved)) {
+          throw new Error(`plpgsql.dylib references missing dependency: ${depMatch[1]}`);
+        }
+      }
+      console.log('plpgsql.dylib dependencies resolve inside bundle');
+    }
   }
 };
 
