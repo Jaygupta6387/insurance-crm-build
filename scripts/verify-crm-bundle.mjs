@@ -60,4 +60,16 @@ if (!existsSync(frontendDist)) {
   process.exit(1);
 }
 
+const serverJs = join(backend, 'src', 'server.js');
+if (!existsSync(serverJs)) {
+  console.error('Missing backend server.js:', serverJs);
+  process.exit(1);
+}
+
+const serverSource = await import('fs').then((fs) => fs.readFileSync(serverJs, 'utf8'));
+if (!serverSource.includes('DESKTOP_FRONTEND_DIST')) {
+  console.error('Backend server.js is missing desktop SPA routes (DESKTOP_FRONTEND_DIST).');
+  process.exit(1);
+}
+
 console.log('CRM bundle verification passed.');
