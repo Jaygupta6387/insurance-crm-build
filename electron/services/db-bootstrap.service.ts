@@ -102,6 +102,10 @@ export const runMigrations = async (
   onProgress('Migrations complete');
 };
 
+import type { SecureStoreData } from './secure-store.service';
+
+const normalizeAdminEmail = (email: string): string => email.trim().toLowerCase();
+
 export const seedAdminUser = async (
   config: PostgresConfig,
   adminEmail: string,
@@ -111,6 +115,7 @@ export const seedAdminUser = async (
   options?: { overwritePassword?: boolean }
 ): Promise<void> => {
   onProgress('Seeding admin user…');
+  const email = normalizeAdminEmail(adminEmail);
   const client = new Client({ connectionString: buildDatabaseUrl(config) });
   await client.connect();
   try {
@@ -121,11 +126,34 @@ export const seedAdminUser = async (
       INSERT INTO "users" ("id", "full_name", "email", "password_hash", "role", "is_active", "must_change_password", "created_at", "updated_at")
       VALUES (gen_random_uuid()::text, $1, $2, $3, 'ADMIN', true, true, NOW(), NOW())
       ${conflictClause}
-    `, [adminName, adminEmail, adminPasswordHash]);
+    `, [adminName, email, adminPasswordHash]);
+
+    const check = await client.query('SELECT 1 FROM "users" WHERE "email" = $1 LIMIT 1', [email]);
+    if (check.rowCount === 0) {
+      throw new Error('Admin user could not be created in the local database.');
+    }
   } finally {
     await client.end();
   }
   onProgress('Admin user ready');
+};
+
+export const syncDesktopAdminFromLicense = async (
+  config: PostgresConfig,
+  creds: Pick<SecureStoreData, 'adminEmail' | 'adminPasswordHash' | 'adminName' | 'companyName'>,
+  onProgress: (msg: string) => void = () => {}
+): Promise<void> => {
+  if (!creds.adminEmail || !creds.adminPasswordHash) {
+    throw new Error('License activation did not return admin credentials.');
+  }
+  await seedAdminUser(
+    config,
+    creds.adminEmail,
+    creds.adminPasswordHash,
+    creds.adminName || creds.companyName || 'Admin',
+    onProgress,
+    { overwritePassword: true }
+  );
 };
 
 export { buildDatabaseUrl };

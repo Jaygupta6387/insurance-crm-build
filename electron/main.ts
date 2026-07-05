@@ -10,7 +10,7 @@ import {
   resetPostgresData,
   ensurePostgresRunning,
 } from './services/postgres-installer';
-import { createDatabase, runMigrations, seedAdminUser, buildDatabaseUrl } from './services/db-bootstrap.service';
+import { createDatabase, runMigrations, seedAdminUser, syncDesktopAdminFromLicense, buildDatabaseUrl } from './services/db-bootstrap.service';
 import { getCrmBackendPath } from './services/app-paths.service';
 import { startCrmServer, stopCrmServer, getCrmAppUrl } from './services/crm-server.service';
 import { initAutoUpdater, installUpdate, checkForUpdates } from './services/updater.service';
@@ -64,7 +64,6 @@ const createWindow = (): BrowserWindow => {
 
 const ensureLicenseMetadata = async () => {
   let store = loadSecureStore();
-  if (store.adminPasswordHash && store.adminName) return store;
   if (!store.licenseKey) return store;
 
   try {
@@ -73,11 +72,13 @@ const ensureLicenseMetadata = async () => {
     store = {
       ...store,
       licenseToken: result.license_token,
-      adminPasswordHash: result.admin_password_hash,
-      adminName: result.admin_name,
-      adminEmail: result.admin_email,
-      subdomain: result.subdomain,
+      licenseKey: store.licenseKey,
+      tenantId: result.tenant_id,
       companyName: result.company_name,
+      adminEmail: result.admin_email,
+      adminName: result.admin_name,
+      adminPasswordHash: result.admin_password_hash,
+      subdomain: result.subdomain,
       machineHash: fp.machineHash,
     };
     saveSecureStore(store);
@@ -127,11 +128,13 @@ const launchCrm = async (store: ReturnType<typeof loadSecureStore>): Promise<str
     throw new Error('Setup is not complete yet');
   }
 
+  const refreshed = await ensureLicenseMetadata();
   const config = await ensurePostgresRunning((msg) => console.log('[postgres]', msg));
+  await syncDesktopAdminFromLicense(config, refreshed, (msg) => console.log('[admin-sync]', msg));
   const databaseUrl = buildDatabaseUrl(config);
   saveSecureStore({ ...loadSecureStore(), databaseUrl, dbPort: config.port });
 
-  const slug = store.subdomain || 'local';
+  const slug = refreshed.subdomain || store.subdomain || 'local';
   const backendEntry = join(getCrmBackendPath(), 'src', 'server.js');
   if (!existsSync(backendEntry)) {
     throw new Error(`CRM backend missing from install: ${backendEntry}`);
@@ -319,6 +322,7 @@ ipcMain.handle('setup:run', async () => {
           onProgress,
           { overwritePassword: true }
         );
+        await syncDesktopAdminFromLicense(config, creds, onProgress);
       },
     },
     {
