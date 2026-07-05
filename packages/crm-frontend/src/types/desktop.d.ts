@@ -1,11 +1,17 @@
-export interface DesktopBridge {
-  resetForNewLicense?: () => Promise<{ success: boolean }>;
-}
+export {};
 
 declare global {
   interface Window {
-    desktop?: DesktopBridge;
+    desktop?: {
+      getStore?: () => Promise<{
+        hasLicense: boolean;
+        setupComplete: boolean;
+        companyName?: string;
+        adminEmail?: string;
+      }>;
+      selectDocumentRoot?: () => Promise<{ canceled: boolean; path?: string }>;
+      openExternal?: (url: string) => Promise<void>;
+      resetForNewLicense?: () => Promise<{ success: boolean }>;
+    };
   }
 }
-
-export {};
