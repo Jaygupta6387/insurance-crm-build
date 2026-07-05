@@ -387,15 +387,19 @@ const pgRuntimeEnv = (pgCtl: string, dataDir: string): NodeJS.ProcessEnv => {
   const pathKey = process.platform === 'win32' ? 'Path' : 'PATH';
   const pathSep = process.platform === 'win32' ? ';' : ':';
   const existingPath = process.env[pathKey] || '';
+  const pathParts = [pgBinDir];
+
+  const libDir = join(pgRoot, 'lib');
+  if (existsSync(libDir)) pathParts.push(libDir);
+  pathParts.push(pgRoot, existingPath);
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     PGDATA: dataDir,
-    [pathKey]: `${pgBinDir}${pathSep}${pgRoot}${pathSep}${existingPath}`,
+    [pathKey]: pathParts.filter(Boolean).join(pathSep),
   };
 
   if (process.platform === 'darwin') {
-    const libDir = join(pgRoot, 'lib');
     const pgLibDir = join(libDir, 'postgresql');
     const dyldParts = [libDir, pgLibDir].filter((p) => existsSync(p));
     if (dyldParts.length) {
@@ -548,6 +552,23 @@ const resolveInitdbShareDir = (pgCtl: string): string | null => {
   return null;
 };
 
+const resolvePkgLibDir = (pgCtl: string): string | null => {
+  const pgRoot = dirname(dirname(pgCtl));
+  const candidates = [
+    join(pgRoot, 'lib', 'postgresql'),
+    join(pgRoot, 'lib'),
+  ];
+
+  for (const candidate of candidates) {
+    const hasSnowball = ['dict_snowball.dylib', 'dict_snowball.so', 'dict_snowball.dll'].some((name) =>
+      existsSync(join(candidate, name))
+    );
+    if (hasSnowball) return candidate;
+  }
+
+  return null;
+};
+
 const ensureMacShareCompatibilityLink = (pgCtl: string): void => {
   if (process.platform !== 'darwin') return;
   const shareDir = resolveInitdbShareDir(pgCtl);
@@ -560,6 +581,25 @@ const ensureMacShareCompatibilityLink = (pgCtl: string): void => {
   } catch {
     // If this fails, initdb/start will surface the concrete PostgreSQL error.
   }
+};
+
+const ensureMacLibCompatibilityLink = (pgCtl: string): void => {
+  if (process.platform !== 'darwin') return;
+  const libDir = resolvePkgLibDir(pgCtl);
+  if (!libDir) return;
+
+  const compatPath = '/tmp/insurecrm-pglib';
+  try {
+    rmSync(compatPath, { recursive: true, force: true });
+    symlinkSync(libDir, compatPath, 'dir');
+  } catch {
+    // If this fails, initdb/start will surface the concrete PostgreSQL error.
+  }
+};
+
+const ensureMacBundledPgCompatibilityLinks = (pgCtl: string): void => {
+  ensureMacShareCompatibilityLink(pgCtl);
+  ensureMacLibCompatibilityLink(pgCtl);
 };
 
 const runInitdb = async (
@@ -591,7 +631,7 @@ const runInitdb = async (
   if (shareDir) {
     initArgs.push('-L', shareDir);
   }
-  ensureMacShareCompatibilityLink(pgCtl);
+  ensureMacBundledPgCompatibilityLinks(pgCtl);
 
   try {
     const result = await runPgAsync(initdb, initArgs, {
@@ -873,7 +913,7 @@ export const installPostgres = async (
         : 'Install PostgreSQL via Homebrew (`brew install postgresql@16`) or bundle binaries in resources/postgresql-mac/.';
     throw new Error(`PostgreSQL was not found on this computer. ${help}`);
   }
-  ensureMacShareCompatibilityLink(pgCtl);
+  ensureMacBundledPgCompatibilityLinks(pgCtl);
 
   const runningPort = await isOurClusterRunning(config.dataDir, pgCtl);
   if (runningPort) {
@@ -927,7 +967,7 @@ export const ensurePostgresRunning = async (
       'PostgreSQL is not available in this install. Reinstall InsureCRM Desktop or run setup again.'
     );
   }
-  ensureMacShareCompatibilityLink(pgCtl);
+  ensureMacBundledPgCompatibilityLinks(pgCtl);
 
   if (!isClusterInitialized(config.dataDir)) {
     throw new Error('Local database has not been set up. Complete setup in InsureCRM Desktop.');

@@ -264,7 +264,7 @@ const relinkMacPostgres = (bundleRoot) => {
   console.log('Relinking bundled PostgreSQL for portable macOS use...');
   for (const file of listFilesRecursive(binDir)) relinkFile(file, 'bin');
   for (const file of listFilesRecursive(libRoot)) {
-    if (file.endsWith('.dylib')) relinkFile(file, 'lib');
+    if (file.endsWith('.dylib') || file.endsWith('.so')) relinkFile(file, 'lib');
   }
   console.log(`Relink complete (${changes} dependency path(s) updated)`);
 };
@@ -275,7 +275,7 @@ const listRuntimeMachOFiles = (bundleRoot) => {
   const files = [];
   for (const file of listFilesRecursive(binDir)) files.push(file);
   for (const file of listFilesRecursive(libRoot)) {
-    if (file.endsWith('.dylib')) files.push(file);
+    if (file.endsWith('.dylib') || file.endsWith('.so')) files.push(file);
   }
   return files;
 };
@@ -298,20 +298,11 @@ const replaceAllBufferOccurrences = (data, oldBuf, newBuf) => {
   return { data, count };
 };
 
-const patchMacPostgresSharePath = (bundleRoot) => {
+const patchMacPostgresEmbeddedPaths = (bundleRoot, replacementText, candidates, label) => {
   if (process.platform !== 'darwin') return;
 
-  const replacement = Buffer.from('/tmp/insurecrm-pgshare', 'utf8');
-  const candidates = [
-    '/opt/homebrew/opt/postgresql@18/share/postgresql@18',
-    '/opt/homebrew/opt/postgresql@17/share/postgresql@17',
-    '/opt/homebrew/opt/postgresql@16/share/postgresql@16',
-    '/opt/homebrew/opt/postgresql@15/share/postgresql@15',
-    '/usr/local/opt/postgresql@18/share/postgresql@18',
-    '/usr/local/opt/postgresql@17/share/postgresql@17',
-    '/usr/local/opt/postgresql@16/share/postgresql@16',
-    '/usr/local/opt/postgresql@15/share/postgresql@15',
-  ];
+  const replacement = Buffer.from(replacementText, 'utf8');
+  const sortedCandidates = [...candidates].sort((a, b) => b.length - a.length);
 
   let patched = 0;
   for (const file of listRuntimeMachOFiles(bundleRoot)) {
@@ -319,7 +310,7 @@ const patchMacPostgresSharePath = (bundleRoot) => {
     let data = readFileSync(file);
     let changed = false;
 
-    for (const oldPath of candidates) {
+    for (const oldPath of sortedCandidates) {
       const oldBuf = Buffer.from(oldPath, 'utf8');
       const result = replaceAllBufferOccurrences(data, oldBuf, replacement);
       if (result.count > 0) {
@@ -331,10 +322,44 @@ const patchMacPostgresSharePath = (bundleRoot) => {
     if (changed) {
       writeFileSync(file, data);
       patched += 1;
-      console.log(`  patched share path: ${basename(file)}`);
+      console.log(`  patched ${label}: ${basename(file)}`);
     }
   }
-  console.log(`Patched PostgreSQL share path in ${patched} Mach-O file(s)`);
+  console.log(`Patched PostgreSQL ${label} in ${patched} Mach-O file(s)`);
+};
+
+const patchMacPostgresSharePath = (bundleRoot) => {
+  patchMacPostgresEmbeddedPaths(bundleRoot, '/tmp/insurecrm-pgshare', [
+    '/opt/homebrew/opt/postgresql@18/share/postgresql@18',
+    '/opt/homebrew/opt/postgresql@17/share/postgresql@17',
+    '/opt/homebrew/opt/postgresql@16/share/postgresql@16',
+    '/opt/homebrew/opt/postgresql@15/share/postgresql@15',
+    '/usr/local/opt/postgresql@18/share/postgresql@18',
+    '/usr/local/opt/postgresql@17/share/postgresql@17',
+    '/usr/local/opt/postgresql@16/share/postgresql@16',
+    '/usr/local/opt/postgresql@15/share/postgresql@15',
+  ], 'share path');
+};
+
+const patchMacPostgresLibPath = (bundleRoot) => {
+  patchMacPostgresEmbeddedPaths(bundleRoot, '/tmp/insurecrm-pglib', [
+    '/opt/homebrew/opt/postgresql@18/lib/postgresql',
+    '/opt/homebrew/opt/postgresql@17/lib/postgresql',
+    '/opt/homebrew/opt/postgresql@16/lib/postgresql',
+    '/opt/homebrew/opt/postgresql@15/lib/postgresql',
+    '/opt/homebrew/lib/postgresql@18',
+    '/opt/homebrew/lib/postgresql@17',
+    '/opt/homebrew/lib/postgresql@16',
+    '/opt/homebrew/lib/postgresql@15',
+    '/usr/local/opt/postgresql@18/lib/postgresql',
+    '/usr/local/opt/postgresql@17/lib/postgresql',
+    '/usr/local/opt/postgresql@16/lib/postgresql',
+    '/usr/local/opt/postgresql@15/lib/postgresql',
+    '/usr/local/lib/postgresql@18',
+    '/usr/local/lib/postgresql@17',
+    '/usr/local/lib/postgresql@16',
+    '/usr/local/lib/postgresql@15',
+  ], 'lib path');
 };
 
 const signMacPostgres = (bundleRoot) => {
@@ -417,6 +442,21 @@ const bundleFromZip = async (url) => {
   console.log(`Bundled PostgreSQL -> ${destDir}`);
 };
 
+const findDictSnowball = (bundleRoot) => {
+  const names = ['dict_snowball.dylib', 'dict_snowball.so', 'dict_snowball.dll'];
+  const roots = [
+    join(bundleRoot, 'lib', 'postgresql'),
+    join(bundleRoot, 'lib'),
+  ];
+  for (const root of roots) {
+    for (const name of names) {
+      const candidate = join(root, name);
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return null;
+};
+
 const verify = () => {
   const bin = platform === 'win' ? 'pg_ctl.exe' : 'pg_ctl';
   const pgCtl = join(destDir, 'bin', bin);
@@ -424,6 +464,12 @@ const verify = () => {
     throw new Error(`Missing ${pgCtl} after bundle`);
   }
   console.log(`Verified ${pgCtl}`);
+
+  const snowball = findDictSnowball(destDir);
+  if (!snowball) {
+    throw new Error('Missing dict_snowball extension module in PostgreSQL bundle');
+  }
+  console.log(`Verified extension module ${snowball}`);
 
   if (platform === 'mac') {
     const initdb = join(destDir, 'bin', 'initdb');
@@ -446,7 +492,15 @@ const verify = () => {
     if (badSharePath) {
       throw new Error(`postgres still references Homebrew share path: ${badSharePath}`);
     }
-    console.log('postgres has no Homebrew share path dependency');
+    const badLibPath = stringsOut
+      .split('\n')
+      .find((line) =>
+        /\/(opt\/homebrew|usr\/local)\/(opt\/postgresql@\d+\/lib\/postgresql|lib\/postgresql@\d+)/.test(line),
+      );
+    if (badLibPath) {
+      throw new Error(`postgres still references Homebrew lib path: ${badLibPath}`);
+    }
+    console.log('postgres has no Homebrew share/lib path dependency');
   }
 };
 
@@ -466,6 +520,7 @@ const main = async () => {
     copyExternalDeps(destDir);
     relinkMacPostgres(destDir);
     patchMacPostgresSharePath(destDir);
+    patchMacPostgresLibPath(destDir);
     signMacPostgres(destDir);
   } else {
     throw new Error(`Unsupported platform: ${platform}`);
