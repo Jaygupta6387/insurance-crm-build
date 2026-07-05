@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
-import { BrowserRouter, Routes, Route, Navigate, useParams } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useParams, useLocation } from 'react-router-dom';
 import { ThemeProvider } from '@/components/common/ThemeProvider';
 import { ToastContextProvider } from '@/components/ui/toaster';
 import ProtectedRoute from '@/components/common/ProtectedRoute';
@@ -43,8 +43,9 @@ import { useAuthStore } from '@/store/authStore';
 function SessionRestorer({ children }: { children: ReactNode }) {
   const setAuth = useAuthStore((s) => s.setAuth);
   const setLoading = useAuthStore((s) => s.setLoading);
-  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const logout = useAuthStore((s) => s.logout);
   const { company_slug } = useParams();
+  const location = useLocation();
   const restoreAttempted = useRef(false);
 
   useEffect(() => {
@@ -52,10 +53,19 @@ function SessionRestorer({ children }: { children: ReactNode }) {
       setLoading(false);
       return;
     }
-    if (isAuthenticated) {
+
+    const publicAuthRoute =
+      location.pathname.endsWith('/login') ||
+      location.pathname.includes('/forgot-password') ||
+      location.pathname.includes('/reset-password');
+
+    if (publicAuthRoute) {
+      logout();
       setLoading(false);
+      restoreAttempted.current = false;
       return;
     }
+
     if (restoreAttempted.current) return;
     restoreAttempted.current = true;
 
@@ -71,10 +81,11 @@ function SessionRestorer({ children }: { children: ReactNode }) {
         });
       })
       .catch(() => {
+        logout();
         setLoading(false);
       });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [company_slug]);
+  }, [company_slug, location.pathname]);
 
   return <>{children}</>;
 }

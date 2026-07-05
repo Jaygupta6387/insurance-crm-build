@@ -83,9 +83,12 @@ if (isDesktopMode() && process.env.DESKTOP_FRONTEND_DIST) {
     res.redirect(302, `/${slug}/login`);
   });
 
-  app.use(express.static(dist));
-  app.get(/^\/(?!api).*/, (_req, res) => {
-    res.sendFile(path.join(dist, 'index.html'));
+  app.use(express.static(dist, { index: false }));
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api')) return next();
+    res.sendFile(path.join(dist, 'index.html'), (err) => {
+      if (err) next(err);
+    });
   });
 }
 

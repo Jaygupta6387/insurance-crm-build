@@ -158,12 +158,44 @@ const launchCrm = async (store: ReturnType<typeof loadSecureStore>): Promise<str
   return url;
 };
 
-const bootstrapApp = async (): Promise<'activation' | 'setup' | 'crm' | 'locked'> => {
+const resolveBootstrapState = async (): Promise<'activation' | 'setup' | 'crm' | 'locked'> => {
   const store = loadSecureStore();
-  if (!store.licenseToken) return 'activation';
+  const hasActivationData = Boolean(
+    store.licenseKey &&
+      store.licenseToken &&
+      store.adminEmail &&
+      store.adminPasswordHash &&
+      store.subdomain
+  );
+
+  if (!hasActivationData) {
+    return 'activation';
+  }
+
+  try {
+    const fp = await collectFingerprint();
+    const machineHash = store.machineHash || fp.machineHash;
+    if (!store.machineHash) {
+      saveSecureStore({ ...store, machineHash });
+    }
+    await heartbeatLicenseWithRetry(store.licenseToken!, machineHash, 2);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const licenseRejected = /invalid|revoked|expired|unauthorized|forbidden|not found|403|401/i.test(message);
+    if (licenseRejected) {
+      console.warn('[license] stored license rejected — returning to activation:', message);
+      await resetLocalInstallation();
+      return 'activation';
+    }
+    console.warn('[license] heartbeat skipped (offline or cloud unreachable):', message);
+  }
+
   if (!store.setupComplete) return 'setup';
   return 'crm';
 };
+
+const bootstrapApp = async (): Promise<'activation' | 'setup' | 'crm' | 'locked'> =>
+  resolveBootstrapState();
 
 app.whenReady().then(() => {
   mainWindow = createWindow();
@@ -199,7 +231,9 @@ ipcMain.handle('updater:check', () => {
 ipcMain.handle('store:get', () => {
   const s = loadSecureStore();
   return {
-    hasLicense: !!s.licenseToken,
+    hasLicense: Boolean(
+      s.licenseKey && s.licenseToken && s.adminEmail && s.adminPasswordHash && s.subdomain
+    ),
     setupComplete: !!s.setupComplete,
     companyName: s.companyName,
     adminEmail: s.adminEmail,
@@ -242,6 +276,14 @@ ipcMain.handle('setup:reset-postgres', async () => {
 });
 
 ipcMain.handle('setup:run', async () => {
+  const activation = loadSecureStore();
+  if (!activation.licenseKey || !activation.licenseToken) {
+    throw new Error('License not activated. Close the app, reopen it, and enter your license key first.');
+  }
+  if (!activation.adminEmail || !activation.adminPasswordHash) {
+    throw new Error('License activation is incomplete. Enter your license key again to continue setup.');
+  }
+
   const config = getDefaultPostgresConfig();
   const steps: Array<{ id: string; label: string; run: (onProgress: (m: string) => void) => Promise<void> }> = [
     {
@@ -265,8 +307,9 @@ ipcMain.handle('setup:run', async () => {
       run: async (onProgress) => {
         const creds = loadSecureStore();
         if (!creds.adminEmail || !creds.adminPasswordHash) {
-          onProgress('Skipping admin seed — use welcome-email password after Super Admin is updated');
-          return;
+          throw new Error(
+            'Admin credentials from license activation are missing. Go back and activate your license key again.'
+          );
         }
         await seedAdminUser(
           config,
