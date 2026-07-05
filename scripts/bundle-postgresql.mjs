@@ -269,6 +269,17 @@ const relinkMacPostgres = (bundleRoot) => {
   console.log(`Relink complete (${changes} dependency path(s) updated)`);
 };
 
+const listRuntimeMachOFiles = (bundleRoot) => {
+  const binDir = join(bundleRoot, 'bin');
+  const libRoot = join(bundleRoot, 'lib');
+  const files = [];
+  for (const file of listFilesRecursive(binDir)) files.push(file);
+  for (const file of listFilesRecursive(libRoot)) {
+    if (file.endsWith('.dylib')) files.push(file);
+  }
+  return files;
+};
+
 const patchMacPostgresSharePath = (bundleRoot) => {
   if (process.platform !== 'darwin') return;
 
@@ -285,7 +296,7 @@ const patchMacPostgresSharePath = (bundleRoot) => {
   ];
 
   let patched = 0;
-  for (const file of listFilesRecursive(bundleRoot)) {
+  for (const file of listRuntimeMachOFiles(bundleRoot)) {
     if (!isMachO(file)) continue;
     let data = readFileSync(file);
     let changed = false;
@@ -317,7 +328,7 @@ const signMacPostgres = (bundleRoot) => {
 
   console.log('Ad-hoc signing bundled PostgreSQL binaries...');
   let signed = 0;
-  for (const file of listFilesRecursive(bundleRoot)) {
+  for (const file of listRuntimeMachOFiles(bundleRoot)) {
     if (!isMachO(file)) continue;
     try {
       execSync(`codesign --force --sign - "${file}"`, { stdio: 'pipe' });
