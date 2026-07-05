@@ -280,10 +280,28 @@ const listRuntimeMachOFiles = (bundleRoot) => {
   return files;
 };
 
+const replaceAllBufferOccurrences = (data, oldBuf, newBuf) => {
+  if (newBuf.length > oldBuf.length) {
+    throw new Error(`Replacement buffer is longer than search buffer (${newBuf.length} > ${oldBuf.length})`);
+  }
+  let idx = data.indexOf(oldBuf);
+  if (idx === -1) return { data, count: 0 };
+
+  let count = 0;
+  while (idx !== -1) {
+    const padded = Buffer.alloc(oldBuf.length);
+    newBuf.copy(padded, 0);
+    data = Buffer.concat([data.subarray(0, idx), padded, data.subarray(idx + oldBuf.length)]);
+    count += 1;
+    idx = data.indexOf(oldBuf, idx + padded.length);
+  }
+  return { data, count };
+};
+
 const patchMacPostgresSharePath = (bundleRoot) => {
   if (process.platform !== 'darwin') return;
 
-  const replacement = '/tmp/insurecrm-pgshare';
+  const replacement = Buffer.from('/tmp/insurecrm-pgshare', 'utf8');
   const candidates = [
     '/opt/homebrew/opt/postgresql@18/share/postgresql@18',
     '/opt/homebrew/opt/postgresql@17/share/postgresql@17',
@@ -303,15 +321,11 @@ const patchMacPostgresSharePath = (bundleRoot) => {
 
     for (const oldPath of candidates) {
       const oldBuf = Buffer.from(oldPath, 'utf8');
-      const idx = data.indexOf(oldBuf);
-      if (idx === -1) continue;
-      if (replacement.length > oldPath.length) {
-        throw new Error(`Replacement PostgreSQL share path is too long: ${replacement}`);
+      const result = replaceAllBufferOccurrences(data, oldBuf, replacement);
+      if (result.count > 0) {
+        data = result.data;
+        changed = true;
       }
-      const newBuf = Buffer.alloc(oldPath.length);
-      newBuf.write(replacement, 'utf8');
-      data = Buffer.concat([data.subarray(0, idx), newBuf, data.subarray(idx + oldBuf.length)]);
-      changed = true;
     }
 
     if (changed) {
