@@ -10,12 +10,13 @@ import {
   resetPostgresData,
   ensurePostgresRunning,
 } from './services/postgres-installer';
-import { createDatabase, runMigrations, seedAdminUser, syncDesktopAdminFromLicense, buildDatabaseUrl } from './services/db-bootstrap.service';
+import { createDatabase, runMigrations, pushCompanySchema, seedAdminUser, syncDesktopAdminFromLicense, buildDatabaseUrl } from './services/db-bootstrap.service';
 import { getCrmBackendPath } from './services/app-paths.service';
 import { startCrmServer, stopCrmServer, getCrmAppUrl } from './services/crm-server.service';
 import { initAutoUpdater, installUpdate, checkForUpdates } from './services/updater.service';
 
 let mainWindow: BrowserWindow | null = null;
+let setupRunInFlight: Promise<{ success: boolean; crmUrl: string }> | null = null;
 
 const normalizeLicenseKey = (key: string): string => key.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
 
@@ -33,6 +34,35 @@ const resetLocalInstallation = async (): Promise<void> => {
   await new Promise<void>((resolve) => setTimeout(resolve, 1000));
   await resetPostgresData();
   clearSecureStore();
+};
+
+const returnToActivationScreen = async (): Promise<void> => {
+  await resetLocalInstallation();
+  if (!mainWindow) return;
+
+  await new Promise<void>((resolve, reject) => {
+    const wc = mainWindow!.webContents;
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error('Timed out returning to license activation'));
+    }, 30_000);
+
+    const onFinish = () => {
+      const current = wc.getURL();
+      if (current.includes('127.0.0.1')) return;
+      cleanup();
+      wc.send('app:state', 'activation');
+      resolve();
+    };
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      wc.removeListener('did-finish-load', onFinish);
+    };
+
+    wc.on('did-finish-load', onFinish);
+    reloadShellUI();
+  });
 };
 
 const createWindow = (): BrowserWindow => {
@@ -131,6 +161,7 @@ const launchCrm = async (store: ReturnType<typeof loadSecureStore>): Promise<str
   const refreshed = await ensureLicenseMetadata();
   const config = await ensurePostgresRunning((msg) => console.log('[postgres]', msg));
   await syncDesktopAdminFromLicense(config, refreshed, (msg) => console.log('[admin-sync]', msg));
+  await pushCompanySchema(config, (msg) => console.log('[schema]', msg));
   const databaseUrl = buildDatabaseUrl(config);
   saveSecureStore({ ...loadSecureStore(), databaseUrl, dbPort: config.port });
 
@@ -144,16 +175,16 @@ const launchCrm = async (store: ReturnType<typeof loadSecureStore>): Promise<str
 
   await startCrmServer({
     DESKTOP_DATABASE_URL: databaseUrl,
-    DESKTOP_LICENSE_TOKEN: store.licenseToken || '',
-    DESKTOP_MACHINE_HASH: store.machineHash || '',
+    DESKTOP_LICENSE_TOKEN: refreshed.licenseToken || store.licenseToken || '',
+    DESKTOP_MACHINE_HASH: refreshed.machineHash || store.machineHash || '',
     DESKTOP_COMPANY_SLUG: slug,
+    DESKTOP_ADMIN_PASSWORD_HASH: refreshed.adminPasswordHash || store.adminPasswordHash || '',
     JWT_ACCESS_SECRET: process.env.JWT_ACCESS_SECRET || 'desktop-access-secret-min-32-chars!!',
     JWT_REFRESH_SECRET: process.env.JWT_REFRESH_SECRET || 'desktop-refresh-secret-min-32-chars!',
     MAIL_FROM_ADDRESS: 'noreply@example.com',
     SMTP_HOST: 'localhost',
     SMTP_USER: 'local',
     SMTP_PASS: 'local',
-    FRONTEND_RESET_PASSWORD_URL: 'http://127.0.0.1/reset',
   });
 
   const url = getCrmAppUrl(slug);
@@ -279,6 +310,9 @@ ipcMain.handle('setup:reset-postgres', async () => {
 });
 
 ipcMain.handle('setup:run', async () => {
+  if (setupRunInFlight) return setupRunInFlight;
+
+  setupRunInFlight = (async () => {
   const activation = loadSecureStore();
   if (!activation.licenseKey || !activation.licenseToken) {
     throw new Error('License not activated. Close the app, reopen it, and enter your license key first.');
@@ -361,6 +395,13 @@ ipcMain.handle('setup:run', async () => {
   const crmUrl = getCrmAppUrl(finalStore.subdomain || 'local');
   send({ step: steps.length, total: steps.length, label: 'Ready', progress: 100, status: 'complete' });
   return { success: true, crmUrl };
+  })();
+
+  try {
+    return await setupRunInFlight;
+  } finally {
+    setupRunInFlight = null;
+  }
 });
 
 ipcMain.handle('crm:open', async () => {
@@ -414,11 +455,7 @@ ipcMain.handle('store:clear', () => {
 
 ipcMain.handle('store:reset-for-new-license', async () => {
   try {
-    await resetLocalInstallation();
-    reloadShellUI();
-    mainWindow?.webContents.once('did-finish-load', () => {
-      mainWindow?.webContents.send('app:state', 'activation');
-    });
+    await returnToActivationScreen();
     return { success: true };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

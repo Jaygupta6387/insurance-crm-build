@@ -34,6 +34,10 @@ export interface PostgresConfig {
 
 const PORT_CANDIDATES = [54329, 54330, 54331, 54332, 54333];
 const START_TIMEOUT_MS = 120_000;
+const INITDB_TIMEOUT_MS = 180_000;
+const PSQL_TIMEOUT_MS = 30_000;
+
+let installPostgresInFlight: Promise<void> | null = null;
 
 const getAppDataDir = () => join(app.getPath('userData'), 'postgresql');
 
@@ -274,20 +278,26 @@ const prepareMacBundledPgRoot = (sourceRoot: string, platform: string): string =
   return runtimeRoot;
 };
 
+const bundledPgRootCandidates = (): string[] => {
+  if (app.isPackaged) {
+    return [
+      join(process.resourcesPath, 'resources'),
+      process.resourcesPath,
+    ];
+  }
+  // Dev: main lives in out/main/ — use app root, not __dirname depth (was one level too high).
+  return [join(app.getAppPath(), 'resources')];
+};
+
 const bundledPgBin = (bin: string): string | null => {
   const platforms =
     process.platform === 'win32'
       ? ['postgresql-win']
       : [`postgresql-mac-${process.arch}`, 'postgresql-mac'];
-  const candidates = [
-    (platform: string) => join(process.resourcesPath, 'resources', platform),
-    (platform: string) => join(process.resourcesPath, platform),
-    (platform: string) => join(__dirname, '../../../resources', platform),
-  ];
 
-  for (const platform of platforms) {
-    for (const getRoot of candidates) {
-      const root = getRoot(platform);
+  for (const base of bundledPgRootCandidates()) {
+    for (const platform of platforms) {
+      const root = join(base, platform);
       if (!existsSync(join(root, 'bin', bin))) continue;
       const preparedRoot = prepareMacBundledPgRoot(root, platform);
       const candidate = join(preparedRoot, 'bin', bin);
@@ -416,7 +426,7 @@ const pgRuntimeEnv = (pgCtl: string, dataDir: string): NodeJS.ProcessEnv => {
 const runPgAsync = (
   executable: string,
   args: string[],
-  options: { env: NodeJS.ProcessEnv; cwd: string }
+  options: { env: NodeJS.ProcessEnv; cwd: string; timeoutMs?: number }
 ): Promise<{ stdout: string; stderr: string; status: number | null }> =>
   new Promise((resolve, reject) => {
     if (!executable?.trim()) {
@@ -434,10 +444,37 @@ const runPgAsync = (
 
     let stdout = '';
     let stderr = '';
+    let settled = false;
+
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      fn();
+    };
+
+    const timer =
+      options.timeoutMs && options.timeoutMs > 0
+        ? setTimeout(() => {
+            try {
+              child.kill('SIGKILL');
+            } catch {
+              // process may already be gone
+            }
+            finish(() =>
+              reject(
+                new Error(
+                  `${executable.split(/[/\\]/).pop()} timed out after ${Math.round(options.timeoutMs! / 1000)}s`
+                )
+              )
+            );
+          }, options.timeoutMs)
+        : null;
+
     child.stdout?.on('data', (chunk) => { stdout += chunk.toString(); });
     child.stderr?.on('data', (chunk) => { stderr += chunk.toString(); });
-    child.on('error', (err) => reject(new Error(`${executable} failed: ${err.message}`)));
-    child.on('close', (status) => resolve({ stdout, stderr, status }));
+    child.on('error', (err) => finish(() => reject(new Error(`${executable} failed: ${err.message}`))));
+    child.on('close', (status) => finish(() => resolve({ stdout, stderr, status })));
   });
 
 const isClusterInitialized = (dataDir: string): boolean =>
@@ -637,6 +674,7 @@ const runInitdb = async (
     const result = await runPgAsync(initdb, initArgs, {
       env: pgEnv,
       cwd: dirname(pgCtl),
+      timeoutMs: INITDB_TIMEOUT_MS,
     });
 
     if (result.status !== 0) {
@@ -662,7 +700,7 @@ const runPsqlCommand = async (
   const pgEnv = pgRuntimeEnv(pgCtl, config.dataDir);
   const args = ['-U', config.user, '-d', 'postgres', '-v', 'ON_ERROR_STOP=1', '-c', sql];
   if (useTcp) args.splice(0, 0, '-h', config.host, '-p', String(config.port));
-  return runPgAsync(psql, args, { env: pgEnv, cwd: dirname(psql) });
+  return runPgAsync(psql, args, { env: pgEnv, cwd: dirname(psql), timeoutMs: PSQL_TIMEOUT_MS });
 };
 
 const withTemporaryTrustHost = async (
@@ -867,6 +905,7 @@ const startDedicatedCluster = async (
     const clusterPort = readClusterPort(config.dataDir);
     if (clusterPort) config.port = clusterPort;
   } else if (existsSync(config.dataDir)) {
+    onProgress('Removing incomplete database folder…');
     await removeDataDirSafely(config.dataDir, pgCtl, onProgress);
   }
 
@@ -895,7 +934,7 @@ const startDedicatedCluster = async (
   }
 };
 
-export const installPostgres = async (
+const installPostgresOnce = async (
   config: PostgresConfig,
   onProgress: (msg: string) => void
 ): Promise<void> => {
@@ -946,6 +985,25 @@ export const installPostgres = async (
     dbName: config.database,
     databaseUrl: buildDatabaseUrl(config),
   });
+};
+
+/** Serialize setup so retries do not spawn overlapping initdb processes. */
+export const installPostgres = async (
+  config: PostgresConfig,
+  onProgress: (msg: string) => void
+): Promise<void> => {
+  if (installPostgresInFlight) {
+    onProgress('Waiting for PostgreSQL setup to finish…');
+    await installPostgresInFlight;
+    return;
+  }
+
+  installPostgresInFlight = installPostgresOnce(config, onProgress);
+  try {
+    await installPostgresInFlight;
+  } finally {
+    installPostgresInFlight = null;
+  }
 };
 
 /**

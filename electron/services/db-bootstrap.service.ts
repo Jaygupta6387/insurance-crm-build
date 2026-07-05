@@ -6,6 +6,26 @@ import { buildDatabaseUrl } from './postgres-installer/index';
 import { getCrmBackendPath } from './app-paths.service';
 import { runNodeScript } from './process-spawn.service';
 
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+const isConcurrentPgError = (err: unknown): boolean =>
+  /tuple concurrently updated|deadlock detected|could not serialize access/i.test(
+    err instanceof Error ? err.message : String(err)
+  );
+
+const withPgRetry = async (label: string, fn: () => Promise<void>, retries = 5): Promise<void> => {
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      await fn();
+      return;
+    } catch (err) {
+      if (!isConcurrentPgError(err) || attempt === retries - 1) throw err;
+      await sleep(250 * (attempt + 1));
+    }
+  }
+  throw new Error(`${label} failed after concurrent PostgreSQL updates — try again.`);
+};
+
 export const createDatabase = async (
   config: PostgresConfig,
   onProgress: (msg: string) => void
@@ -30,45 +50,53 @@ export const createDatabase = async (
   }
 
   try {
-    const userCheck = await adminClient.query('SELECT 1 FROM pg_roles WHERE rolname = $1', [config.user]);
-    if (userCheck.rowCount === 0) {
-      onProgress('Creating database user…');
-      await adminClient.query(`CREATE USER "${config.user}" WITH PASSWORD '${config.password.replace(/'/g, "''")}'`);
-    } else {
-      onProgress('Updating database user password…');
-      await adminClient.query(`ALTER USER "${config.user}" WITH PASSWORD '${config.password.replace(/'/g, "''")}'`);
-    }
+    await withPgRetry('Database user setup', async () => {
+      const userCheck = await adminClient.query('SELECT 1 FROM pg_roles WHERE rolname = $1', [config.user]);
+      if (userCheck.rowCount === 0) {
+        onProgress('Creating database user…');
+        await adminClient.query(
+          `CREATE USER "${config.user}" WITH PASSWORD '${config.password.replace(/'/g, "''")}'`
+        );
+      } else {
+        onProgress('Updating database user password…');
+        await adminClient.query(
+          `ALTER USER "${config.user}" WITH PASSWORD '${config.password.replace(/'/g, "''")}'`
+        );
+      }
+    });
 
-    const dbCheck = await adminClient.query('SELECT 1 FROM pg_database WHERE datname = $1', [config.database]);
-    if (dbCheck.rowCount === 0) {
-      onProgress('Creating database…');
-      await adminClient.query(`CREATE DATABASE "${config.database}" OWNER "${config.user}"`);
-    } else {
-      onProgress('Database already exists');
-    }
+    await withPgRetry('Database creation', async () => {
+      const dbCheck = await adminClient.query('SELECT 1 FROM pg_database WHERE datname = $1', [config.database]);
+      if (dbCheck.rowCount === 0) {
+        onProgress('Creating database…');
+        await adminClient.query(`CREATE DATABASE "${config.database}" OWNER "${config.user}"`);
+      } else {
+        onProgress('Database already exists');
+      }
+    });
   } finally {
     await adminClient.end();
   }
 };
 
-export const runMigrations = async (
+export const pushCompanySchema = async (
   config: PostgresConfig,
-  onProgress: (msg: string) => void
+  onProgress: (msg: string) => void = () => {}
 ): Promise<void> => {
-  onProgress('Running Prisma schema sync…');
+  onProgress('Syncing database schema…');
   const backendPath = getCrmBackendPath();
   const databaseUrl = buildDatabaseUrl(config);
   const prismaCli = join(backendPath, 'node_modules', 'prisma', 'build', 'index.js');
 
   if (!existsSync(prismaCli)) {
     throw new Error(
-      'Prisma is missing from this install. Download the latest InsureCRM Desktop installer and try again.'
+      `Prisma is missing from CRM backend at ${backendPath}. Run npm install in New-CRM 2/backend or npm run sync:crm.`
     );
   }
 
   const result = await runNodeScript(
     prismaCli,
-    ['db', 'push', '--schema=prisma/company.prisma', '--skip-generate'],
+    ['db', 'push', '--schema=prisma/company.prisma', '--skip-generate', '--accept-data-loss'],
     {
       cwd: backendPath,
       env: { DATABASE_URL: databaseUrl },
@@ -78,6 +106,13 @@ export const runMigrations = async (
 
   if (result.stdout.trim()) onProgress(result.stdout.trim());
   if (result.stderr.trim()) onProgress(result.stderr.trim());
+};
+
+export const runMigrations = async (
+  config: PostgresConfig,
+  onProgress: (msg: string) => void
+): Promise<void> => {
+  await pushCompanySchema(config, onProgress);
 
   onProgress('Seeding default master data…');
   const seedClient = new Client({ connectionString: databaseUrl });

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 const STEPS = [
   'Installing PostgreSQL',
@@ -18,6 +18,7 @@ export default function SetupWizard({ onComplete }: Props) {
   const [message, setMessage] = useState('Preparing…');
   const [error, setError] = useState('');
   const [running, setRunning] = useState(false);
+  const setupStartedRef = useRef(false);
 
   const runSetup = useCallback(async (resetFirst = false) => {
     setError('');
@@ -48,7 +49,9 @@ export default function SetupWizard({ onComplete }: Props) {
       if (data.label) setMessage(String(data.label));
     });
 
-    runSetup(false);
+    if (setupStartedRef.current) return unsub;
+    setupStartedRef.current = true;
+    void runSetup(false);
 
     return unsub;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- run once on mount
@@ -88,6 +91,23 @@ export default function SetupWizard({ onComplete }: Props) {
               </button>
               <button type="button" className="btn btn-secondary" disabled={running} onClick={() => runSetup(true)}>
                 Reset database &amp; retry
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={running}
+                onClick={() => {
+                  if (
+                    !window.confirm(
+                      'Remove local database and license so you can enter your license key again?'
+                    )
+                  ) {
+                    return;
+                  }
+                  void window.desktop.resetForNewLicense?.();
+                }}
+              >
+                Re-enter license key
               </button>
             </div>
           </div>

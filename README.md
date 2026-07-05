@@ -12,8 +12,8 @@ See [ARCHITECTURE.md](../ARCHITECTURE.md) for the full split.
 
 ## What this repo does NOT contain
 
-- CRM feature development (use `InsureCRM-Backend` and `InsureCRM-Frontend`)
-- Duplicate logic in `packages/crm-*` (deprecated — use sync pipeline)
+- CRM feature development — use `New-CRM 2/` locally, or `InsureCRM-Backend` + `InsureCRM-Frontend` on GitHub
+- Duplicate CRM source under `packages/` (removed; sync uses `New-CRM 2` → `.crm-bundle/` at build time)
 
 ## Development
 

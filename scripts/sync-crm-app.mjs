@@ -37,8 +37,8 @@ const copyTree = (src, dest) => {
   });
 };
 
-const run = (cmd, cwd) => {
-  execSync(cmd, { cwd, stdio: 'inherit', env: process.env });
+const run = (cmd, cwd, options = {}) => {
+  execSync(cmd, { cwd, stdio: 'inherit', env: options.env || process.env });
 };
 
 if (!existsSync(join(crmBackend, 'package.json'))) {
@@ -68,9 +68,11 @@ if (!existsSync(join(crmFrontend, 'package.json'))) {
   process.exit(1);
 }
 
-console.log('→ Building frontend...');
+console.log('→ Building frontend (same-origin /api for desktop)...');
 run('npm ci', crmFrontend);
-run('npm run build', crmFrontend);
+run('npm run build', crmFrontend, {
+  env: { ...process.env, VITE_API_URL: '' },
+});
 
 console.log('→ Copying frontend dist...');
 cpSync(join(crmFrontend, 'dist'), bundleFrontendDist, { recursive: true });

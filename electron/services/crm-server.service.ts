@@ -81,6 +81,7 @@ export const startCrmServer = async (env: Record<string, string>): Promise<numbe
     PORT: String(crmPort),
     NODE_ENV: 'production',
     FRONTEND_URL: `http://127.0.0.1:${crmPort}`,
+    FRONTEND_RESET_PASSWORD_URL: `http://127.0.0.1:${crmPort}`,
     DATABASE_URL: env.DESKTOP_DATABASE_URL || env.DATABASE_URL || '',
     DESKTOP_DATABASE_URL: env.DESKTOP_DATABASE_URL || env.DATABASE_URL || '',
     CRM_LOG_DIR: logDir,

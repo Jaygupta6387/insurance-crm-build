@@ -1,8 +1,0 @@
-{
-  "watch": ["src"],
-  "ignore": ["src/generated"],
-  "ext": "js,json",
-  "env": {
-    "NODE_ENV": "development"
-  }
-}
