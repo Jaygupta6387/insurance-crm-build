@@ -115,6 +115,7 @@ export const runMigrations = async (
   await pushCompanySchema(config, onProgress);
 
   onProgress('Seeding default master data…');
+  const databaseUrl = buildDatabaseUrl(config);
   const seedClient = new Client({ connectionString: databaseUrl });
   await seedClient.connect();
   try {
