@@ -19,6 +19,12 @@ export interface SecureStoreData {
   dbName?: string;
   dbPort?: number;
   setupComplete?: boolean;
+  savedLoginEmail?: string;
+  savedLoginPassword?: string;
+  savedLoginExpiresAt?: number;
+  planType?: string;
+  subscriptionEnd?: string;
+  maxEmployees?: number;
 }
 
 const STORE_FILENAME = 'secure-store.enc';
@@ -84,3 +90,70 @@ export const clearSecureStore = (): void => {
 
 export const hashMachineComponents = (parts: string[]): string =>
   createHash('sha256').update(parts.filter(Boolean).join('|')).digest('hex');
+
+export const saveLoginCredentials = (email: string, password: string, expiresAt: number): void => {
+  const store = loadSecureStore();
+  saveSecureStore({
+    ...store,
+    savedLoginEmail: email,
+    savedLoginPassword: encrypt(password),
+    savedLoginExpiresAt: expiresAt,
+  });
+};
+
+export const getLoginCredentials = (): { email: string; password: string; expiresAt: number } | null => {
+  const store = loadSecureStore();
+  if (!store.savedLoginEmail || !store.savedLoginPassword || !store.savedLoginExpiresAt) return null;
+  if (Date.now() > store.savedLoginExpiresAt) {
+    clearLoginCredentials();
+    return null;
+  }
+  try {
+    return {
+      email: store.savedLoginEmail,
+      password: decrypt(store.savedLoginPassword),
+      expiresAt: store.savedLoginExpiresAt,
+    };
+  } catch {
+    clearLoginCredentials();
+    return null;
+  }
+};
+
+export const clearLoginCredentials = (): void => {
+  const store = loadSecureStore();
+  const { savedLoginEmail: _e, savedLoginPassword: _p, savedLoginExpiresAt: _x, ...rest } = store;
+  saveSecureStore(rest);
+};
+
+export const getDbCredentialsFromStore = (): {
+  host: string;
+  port: number;
+  user: string;
+  password: string;
+  database: string;
+} => {
+  const store = loadSecureStore();
+  const url = store.databaseUrl;
+  if (url) {
+    try {
+      const parsed = new URL(url);
+      return {
+        host: parsed.hostname || '127.0.0.1',
+        port: parsed.port ? Number(parsed.port) : store.dbPort || 5432,
+        user: decodeURIComponent(parsed.username || store.dbUser || 'postgres'),
+        password: decodeURIComponent(parsed.password || store.dbPassword || ''),
+        database: decodeURIComponent(parsed.pathname.replace(/^\//, '') || store.dbName || ''),
+      };
+    } catch {
+      // fall through
+    }
+  }
+  return {
+    host: '127.0.0.1',
+    port: store.dbPort || 5432,
+    user: store.dbUser || 'postgres',
+    password: store.dbPassword || '',
+    database: store.dbName || '',
+  };
+};

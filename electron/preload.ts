@@ -12,6 +12,17 @@ export interface DesktopApi {
   selectDocumentRoot: () => Promise<{ canceled: boolean; path?: string }>;
   clearStore: () => Promise<void>;
   resetForNewLicense: () => Promise<{ success: boolean }>;
+  saveLogin: (email: string, password: string, expiresAt: number) => Promise<void>;
+  getSavedLogin: () => Promise<{ email: string; password: string; expiresAt: number } | null>;
+  clearSavedLogin: () => Promise<void>;
+  markPasswordVerified: () => Promise<void>;
+  revealDbCredentials: () => Promise<{
+    host: string;
+    port: number;
+    user: string;
+    password: string;
+    database: string;
+  }>;
   onAppState: (cb: (state: string) => void) => () => void;
   onSetupProgress: (cb: (data: Record<string, unknown>) => void) => () => void;
   onUpdateStatus: (cb: (data: { status: string; version?: string; percent?: number; message?: string }) => void) => () => void;
@@ -31,6 +42,11 @@ const api: DesktopApi = {
   selectDocumentRoot: () => ipcRenderer.invoke('dialog:select-document-root'),
   clearStore: () => ipcRenderer.invoke('store:clear'),
   resetForNewLicense: () => ipcRenderer.invoke('store:reset-for-new-license'),
+  saveLogin: (email, password, expiresAt) => ipcRenderer.invoke('auth:save-login', email, password, expiresAt),
+  getSavedLogin: () => ipcRenderer.invoke('auth:get-saved-login'),
+  clearSavedLogin: () => ipcRenderer.invoke('auth:clear-saved-login'),
+  markPasswordVerified: () => ipcRenderer.invoke('settings:mark-password-verified'),
+  revealDbCredentials: () => ipcRenderer.invoke('settings:reveal-db-credentials'),
   onAppState: (cb) => {
     const handler = (_: unknown, state: string) => cb(state);
     ipcRenderer.on('app:state', handler);

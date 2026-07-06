@@ -1,7 +1,15 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import { existsSync } from 'fs';
 import { join } from 'path';
-import { loadSecureStore, saveSecureStore, clearSecureStore } from './services/secure-store.service';
+import {
+  loadSecureStore,
+  saveSecureStore,
+  clearSecureStore,
+  saveLoginCredentials,
+  getLoginCredentials,
+  clearLoginCredentials,
+  getDbCredentialsFromStore,
+} from './services/secure-store.service';
 import { collectFingerprint } from './services/fingerprint.service';
 import { activateLicense, heartbeatLicenseWithRetry, requestTransfer } from './services/license.service';
 import {
@@ -17,6 +25,8 @@ import { initAutoUpdater, installUpdate, checkForUpdates } from './services/upda
 
 let mainWindow: BrowserWindow | null = null;
 let setupRunInFlight: Promise<{ success: boolean; crmUrl: string }> | null = null;
+let lastPasswordVerifiedAt = 0;
+const PASSWORD_VERIFY_TTL_MS = 5 * 60 * 1000;
 
 const normalizeLicenseKey = (key: string): string => key.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
 
@@ -92,6 +102,20 @@ const createWindow = (): BrowserWindow => {
   return win;
 };
 
+const cacheSubscriptionFromLicense = (
+  store: ReturnType<typeof loadSecureStore>,
+  data: { plan?: string; plan_type?: string; user_limit?: number; subscription_end?: string }
+) => {
+  const plan = data.plan || data.plan_type;
+  if (!plan && !data.subscription_end && data.user_limit == null) return store;
+  return {
+    ...store,
+    planType: plan || store.planType,
+    subscriptionEnd: data.subscription_end || store.subscriptionEnd,
+    maxEmployees: data.user_limit ?? store.maxEmployees,
+  };
+};
+
 const ensureLicenseMetadata = async () => {
   let store = loadSecureStore();
   if (!store.licenseKey) return store;
@@ -99,18 +123,21 @@ const ensureLicenseMetadata = async () => {
   try {
     const fp = await collectFingerprint();
     const result = await activateLicense(store.licenseKey, fp);
-    store = {
-      ...store,
-      licenseToken: result.license_token,
-      licenseKey: store.licenseKey,
-      tenantId: result.tenant_id,
-      companyName: result.company_name,
-      adminEmail: result.admin_email,
-      adminName: result.admin_name,
-      adminPasswordHash: result.admin_password_hash,
-      subdomain: result.subdomain,
-      machineHash: fp.machineHash,
-    };
+    store = cacheSubscriptionFromLicense(
+      {
+        ...store,
+        licenseToken: result.license_token,
+        licenseKey: store.licenseKey,
+        tenantId: result.tenant_id,
+        companyName: result.company_name,
+        adminEmail: result.admin_email,
+        adminName: result.admin_name,
+        adminPasswordHash: result.admin_password_hash,
+        subdomain: result.subdomain,
+        machineHash: fp.machineHash,
+      },
+      result
+    );
     saveSecureStore(store);
   } catch (err) {
     console.warn('[license] metadata refresh skipped:', err instanceof Error ? err.message : err);
@@ -178,6 +205,7 @@ const launchCrm = async (store: ReturnType<typeof loadSecureStore>): Promise<str
     DESKTOP_LICENSE_TOKEN: refreshed.licenseToken || store.licenseToken || '',
     DESKTOP_MACHINE_HASH: refreshed.machineHash || store.machineHash || '',
     DESKTOP_COMPANY_SLUG: slug,
+    DESKTOP_COMPANY_NAME: refreshed.companyName || store.companyName || '',
     DESKTOP_ADMIN_PASSWORD_HASH: refreshed.adminPasswordHash || store.adminPasswordHash || '',
     JWT_ACCESS_SECRET: process.env.JWT_ACCESS_SECRET || 'desktop-access-secret-min-32-chars!!',
     JWT_REFRESH_SECRET: process.env.JWT_REFRESH_SECRET || 'desktop-refresh-secret-min-32-chars!',
@@ -296,6 +324,9 @@ ipcMain.handle('license:activate', async (_e, licenseKey: string) => {
       adminPasswordHash: result.admin_password_hash,
       subdomain: result.subdomain,
       machineHash: fp.machineHash,
+      planType: result.plan,
+      subscriptionEnd: result.subscription_end,
+      maxEmployees: result.user_limit,
       setupComplete: false,
     });
     return result;
@@ -431,7 +462,31 @@ ipcMain.handle('license:transfer', async (_e, payload: { reason: string; new_dev
 ipcMain.handle('license:heartbeat', async () => {
   const store = loadSecureStore();
   if (!store.licenseToken) throw new Error('No license activated');
-  return heartbeatLicenseWithRetry(store.licenseToken, store.machineHash || '');
+  const data = await heartbeatLicenseWithRetry(store.licenseToken, store.machineHash || '');
+  const updated = cacheSubscriptionFromLicense(store, data as { plan?: string; plan_type?: string; user_limit?: number; subscription_end?: string });
+  saveSecureStore(updated);
+  return data;
+});
+
+ipcMain.handle('auth:save-login', (_e, email: string, password: string, expiresAt: number) => {
+  saveLoginCredentials(email, password, expiresAt);
+});
+
+ipcMain.handle('auth:get-saved-login', () => getLoginCredentials());
+
+ipcMain.handle('auth:clear-saved-login', () => {
+  clearLoginCredentials();
+});
+
+ipcMain.handle('settings:mark-password-verified', () => {
+  lastPasswordVerifiedAt = Date.now();
+});
+
+ipcMain.handle('settings:reveal-db-credentials', () => {
+  if (!lastPasswordVerifiedAt || Date.now() - lastPasswordVerifiedAt > PASSWORD_VERIFY_TTL_MS) {
+    throw new Error('Password verification required — verify again in Settings');
+  }
+  return getDbCredentialsFromStore();
 });
 
 ipcMain.handle('app:openExternal', (_e, url: string) => shell.openExternal(url));
