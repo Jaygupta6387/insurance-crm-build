@@ -366,7 +366,8 @@ const findMacPgBin = async (bin: string): Promise<string | null> => {
 const resolvePgBin = async (bin: string): Promise<string | null> => {
   const bundled = bundledPgBin(bin);
   if (bundled) return bundled;
-  if (app.isPackaged && process.platform === 'win32') return null;
+  // Packaged installs must use bundled PostgreSQL — system installs vary by machine.
+  if (app.isPackaged) return null;
   if (process.platform === 'win32') return findWindowsPgBin(bin);
   if (process.platform === 'darwin') return findMacPgBin(bin);
   return null;
@@ -391,6 +392,15 @@ const isPortListening = (port: number): Promise<boolean> =>
 export const isPostgresRunning = async (port: number): Promise<boolean> =>
   isPortListening(port);
 
+const pgLocaleEnv = (): NodeJS.ProcessEnv => {
+  if (process.platform !== 'darwin') return {};
+  return {
+    LC_ALL: 'en_US.UTF-8',
+    LANG: 'en_US.UTF-8',
+    LC_CTYPE: 'en_US.UTF-8',
+  };
+};
+
 const pgRuntimeEnv = (pgCtl: string, dataDir: string): NodeJS.ProcessEnv => {
   const pgBinDir = dirname(pgCtl);
   const pgRoot = dirname(pgBinDir);
@@ -407,6 +417,7 @@ const pgRuntimeEnv = (pgCtl: string, dataDir: string): NodeJS.ProcessEnv => {
     ...process.env,
     PGDATA: dataDir,
     [pathKey]: pathParts.filter(Boolean).join(pathSep),
+    ...pgLocaleEnv(),
   };
 
   if (process.platform === 'darwin') {
