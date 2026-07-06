@@ -5,6 +5,7 @@ import type { PostgresConfig } from './postgres-installer/index';
 import { buildDatabaseUrl } from './postgres-installer/index';
 import { getCrmBackendPath } from './app-paths.service';
 import { runNodeScript } from './process-spawn.service';
+import type { SecureStoreData } from './secure-store.service';
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -137,8 +138,6 @@ export const runMigrations = async (
 
   onProgress('Migrations complete');
 };
-
-import type { SecureStoreData } from './secure-store.service';
 
 const normalizeAdminEmail = (email: string): string => email.trim().toLowerCase();
 
