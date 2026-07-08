@@ -387,7 +387,7 @@ ipcMain.handle('setup:run', async () => {
           onProgress,
           { overwritePassword: true }
         );
-        await syncDesktopAdminFromLicense(config, creds, onProgress);
+        await syncDesktopAdminFromLicense(config, creds, onProgress, { overwritePassword: true });
       },
     },
     {

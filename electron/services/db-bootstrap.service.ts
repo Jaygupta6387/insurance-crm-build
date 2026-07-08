@@ -176,18 +176,24 @@ export const seedAdminUser = async (
 export const syncDesktopAdminFromLicense = async (
   config: PostgresConfig,
   creds: Pick<SecureStoreData, 'adminEmail' | 'adminPasswordHash' | 'adminName' | 'companyName'>,
-  onProgress: (msg: string) => void = () => {}
+  onProgress: (msg: string) => void = () => {},
+  options?: { overwritePassword?: boolean }
 ): Promise<void> => {
   if (!creds.adminEmail || !creds.adminPasswordHash) {
     throw new Error('License activation did not return admin credentials.');
   }
+  // On regular launches we must NOT overwrite the local password — the admin may
+  // have changed it inside the CRM, and that change is authoritative for the
+  // local database. Overwriting here would silently revert it to the original
+  // (welcome-email) hash on every relaunch/update. Fresh setup passes
+  // overwritePassword:true to seed the initial credential.
   await seedAdminUser(
     config,
     creds.adminEmail,
     creds.adminPasswordHash,
     creds.adminName || creds.companyName || 'Admin',
     onProgress,
-    { overwritePassword: true }
+    { overwritePassword: options?.overwritePassword ?? false }
   );
 };
 
