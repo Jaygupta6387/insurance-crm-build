@@ -87,6 +87,10 @@ export const startCrmServer = async (env: Record<string, string>): Promise<numbe
     CRM_LOG_DIR: logDir,
     DESKTOP_FRONTEND_DIST: frontendDist,
     LICENSE_CLOUD_API_URL: env.LICENSE_CLOUD_API_URL || CLOUD_LICENSE_API,
+    // Bootstrap env — backend uses these to seed schema/admin/modules on first start
+    DESKTOP_ADMIN_EMAIL: env.DESKTOP_ADMIN_EMAIL || '',
+    DESKTOP_ADMIN_NAME: env.DESKTOP_ADMIN_NAME || '',
+    DESKTOP_ENABLED_FEATURES: env.DESKTOP_ENABLED_FEATURES || '',
   });
 
   const scriptPath = existsSync(bootstrap) ? bootstrap : entry;

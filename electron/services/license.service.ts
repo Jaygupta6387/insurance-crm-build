@@ -23,6 +23,8 @@ export interface ActivationResult {
   user_limit: number;
   subscription_end: string;
   license_token: string;
+  features?: Record<string, string>;
+  enabled_features?: string[];
 }
 
 export const activateLicense = async (

@@ -25,6 +25,8 @@ export interface SecureStoreData {
   planType?: string;
   subscriptionEnd?: string;
   maxEmployees?: number;
+  enabledFeatures?: string[];
+  featureMap?: Record<string, string>;
 }
 
 const STORE_FILENAME = 'secure-store.enc';

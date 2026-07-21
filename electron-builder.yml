@@ -18,10 +18,16 @@ extraResources:
   - from: .crm-bundle/backend
     to: crm-backend
     filter:
-      - "**/*"
+      - "crm-bootstrap.cjs"
+      - "package.json"
+      - "node_modules/**"
+      - "prisma/**"
       - "!logs/**"
       - "!**/.env"
       - "!**/.env.*"
+      - "!src/**"
+      - "!scripts/**"
+      - "!nodemon.json"
   - from: .crm-bundle/frontend/dist
     to: crm-frontend/dist
 

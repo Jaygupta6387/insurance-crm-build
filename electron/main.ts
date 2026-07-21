@@ -1,5 +1,4 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
-import { existsSync } from 'fs';
 import { join } from 'path';
 import {
   loadSecureStore,
@@ -18,8 +17,7 @@ import {
   resetPostgresData,
   ensurePostgresRunning,
 } from './services/postgres-installer';
-import { createDatabase, runMigrations, pushCompanySchema, seedAdminUser, syncDesktopAdminFromLicense, buildDatabaseUrl } from './services/db-bootstrap.service';
-import { getCrmBackendPath } from './services/app-paths.service';
+import { createDatabase, buildDatabaseUrl } from './services/db-bootstrap.service';
 import { startCrmServer, stopCrmServer, getCrmAppUrl } from './services/crm-server.service';
 import { initAutoUpdater, installUpdate, checkForUpdates } from './services/updater.service';
 
@@ -104,15 +102,25 @@ const createWindow = (): BrowserWindow => {
 
 const cacheSubscriptionFromLicense = (
   store: ReturnType<typeof loadSecureStore>,
-  data: { plan?: string; plan_type?: string; user_limit?: number; subscription_end?: string }
+  data: {
+    plan?: string;
+    plan_type?: string;
+    user_limit?: number;
+    subscription_end?: string;
+    features?: Record<string, string>;
+    enabled_features?: string[];
+  }
 ) => {
   const plan = data.plan || data.plan_type;
-  if (!plan && !data.subscription_end && data.user_limit == null) return store;
+  const hasFeatures = data.features || data.enabled_features;
+  if (!plan && !data.subscription_end && data.user_limit == null && !hasFeatures) return store;
   return {
     ...store,
     planType: plan || store.planType,
     subscriptionEnd: data.subscription_end || store.subscriptionEnd,
     maxEmployees: data.user_limit ?? store.maxEmployees,
+    ...(data.enabled_features ? { enabledFeatures: data.enabled_features } : {}),
+    ...(data.features ? { featureMap: data.features } : {}),
   };
 };
 
@@ -135,6 +143,8 @@ const ensureLicenseMetadata = async () => {
         adminPasswordHash: result.admin_password_hash,
         subdomain: result.subdomain,
         machineHash: fp.machineHash,
+        enabledFeatures: result.enabled_features || store.enabledFeatures || [],
+        featureMap: result.features || store.featureMap || {},
       },
       result
     );
@@ -180,6 +190,11 @@ const navigateMainWindowTo = async (url: string): Promise<void> => {
   });
 };
 
+/**
+ * Start the CRM backend, wait for it to be ready, then navigate to the CRM.
+ * All database migration, seeding, and module provisioning is performed by the
+ * backend server itself (desktop-bootstrap.service.js in New-CRM 2) — not here.
+ */
 const launchCrm = async (store: ReturnType<typeof loadSecureStore>): Promise<string> => {
   if (!store.setupComplete) {
     throw new Error('Setup is not complete yet');
@@ -187,16 +202,10 @@ const launchCrm = async (store: ReturnType<typeof loadSecureStore>): Promise<str
 
   const refreshed = await ensureLicenseMetadata();
   const config = await ensurePostgresRunning((msg) => console.log('[postgres]', msg));
-  await syncDesktopAdminFromLicense(config, refreshed, (msg) => console.log('[admin-sync]', msg));
-  await pushCompanySchema(config, (msg) => console.log('[schema]', msg));
   const databaseUrl = buildDatabaseUrl(config);
   saveSecureStore({ ...loadSecureStore(), databaseUrl, dbPort: config.port });
 
   const slug = refreshed.subdomain || store.subdomain || 'local';
-  const backendEntry = join(getCrmBackendPath(), 'src', 'server.js');
-  if (!existsSync(backendEntry)) {
-    throw new Error(`CRM backend missing from install: ${backendEntry}`);
-  }
 
   stopCrmServer();
 
@@ -206,7 +215,10 @@ const launchCrm = async (store: ReturnType<typeof loadSecureStore>): Promise<str
     DESKTOP_MACHINE_HASH: refreshed.machineHash || store.machineHash || '',
     DESKTOP_COMPANY_SLUG: slug,
     DESKTOP_COMPANY_NAME: refreshed.companyName || store.companyName || '',
+    DESKTOP_ADMIN_EMAIL: refreshed.adminEmail || store.adminEmail || '',
+    DESKTOP_ADMIN_NAME: refreshed.adminName || store.adminName || '',
     DESKTOP_ADMIN_PASSWORD_HASH: refreshed.adminPasswordHash || store.adminPasswordHash || '',
+    DESKTOP_ENABLED_FEATURES: (refreshed.enabledFeatures || store.enabledFeatures || []).join(','),
     JWT_ACCESS_SECRET: process.env.JWT_ACCESS_SECRET || 'desktop-access-secret-min-32-chars!!',
     JWT_REFRESH_SECRET: process.env.JWT_REFRESH_SECRET || 'desktop-refresh-secret-min-32-chars!',
     MAIL_FROM_ADDRESS: 'noreply@example.com',
@@ -256,16 +268,12 @@ const resolveBootstrapState = async (): Promise<'activation' | 'setup' | 'crm' |
   return 'crm';
 };
 
-const bootstrapApp = async (): Promise<'activation' | 'setup' | 'crm' | 'locked'> =>
-  resolveBootstrapState();
-
 app.whenReady().then(() => {
   mainWindow = createWindow();
   initAutoUpdater(mainWindow);
 
-  // Never block the main process before the window is interactive.
   mainWindow.webContents.once('did-finish-load', () => {
-    void bootstrapApp()
+    void resolveBootstrapState()
       .then((state) => mainWindow?.webContents.send('app:state', state))
       .catch(() => mainWindow?.webContents.send('app:state', 'activation'));
   });
@@ -327,6 +335,8 @@ ipcMain.handle('license:activate', async (_e, licenseKey: string) => {
       planType: result.plan,
       subscriptionEnd: result.subscription_end,
       maxEmployees: result.user_limit,
+      enabledFeatures: result.enabled_features || [],
+      featureMap: result.features || {},
       setupComplete: false,
     });
     return result;
@@ -344,88 +354,80 @@ ipcMain.handle('setup:run', async () => {
   if (setupRunInFlight) return setupRunInFlight;
 
   setupRunInFlight = (async () => {
-  const activation = loadSecureStore();
-  if (!activation.licenseKey || !activation.licenseToken) {
-    throw new Error('License not activated. Close the app, reopen it, and enter your license key first.');
-  }
-  if (!activation.adminEmail || !activation.adminPasswordHash) {
-    throw new Error('License activation is incomplete. Enter your license key again to continue setup.');
-  }
+    const activation = loadSecureStore();
+    if (!activation.licenseKey || !activation.licenseToken) {
+      throw new Error('License not activated. Close the app, reopen it, and enter your license key first.');
+    }
+    if (!activation.adminEmail || !activation.adminPasswordHash) {
+      throw new Error('License activation is incomplete. Enter your license key again to continue setup.');
+    }
 
-  const config = getDefaultPostgresConfig();
-  const steps: Array<{ id: string; label: string; run: (onProgress: (m: string) => void) => Promise<void> }> = [
-    {
-      id: 'postgres',
-      label: 'Installing PostgreSQL',
-      run: async (onProgress) => installPostgres(config, onProgress),
-    },
-    {
-      id: 'database',
-      label: 'Creating Database',
-      run: async (onProgress) => createDatabase(config, onProgress),
-    },
-    {
-      id: 'migrations',
-      label: 'Creating Tables',
-      run: async (onProgress) => runMigrations(config, onProgress),
-    },
-    {
-      id: 'seed',
-      label: 'Creating Admin User',
-      run: async (onProgress) => {
-        const creds = loadSecureStore();
-        if (!creds.adminEmail || !creds.adminPasswordHash) {
-          throw new Error(
-            'Admin credentials from license activation are missing. Go back and activate your license key again.'
-          );
-        }
-        await seedAdminUser(
-          config,
-          creds.adminEmail,
-          creds.adminPasswordHash,
-          creds.adminName || creds.companyName || 'Admin',
-          onProgress,
-          { overwritePassword: true }
-        );
-        await syncDesktopAdminFromLicense(config, creds, onProgress, { overwritePassword: true });
+    const config = getDefaultPostgresConfig();
+
+    // Setup steps — schema, seeding and module provisioning are handled by
+    // the backend (desktop-bootstrap.service.js) when it starts in step 3.
+    const steps: Array<{ id: string; label: string; run: (onProgress: (m: string) => void) => Promise<void> }> = [
+      {
+        id: 'postgres',
+        label: 'Installing PostgreSQL',
+        run: async (onProgress) => installPostgres(config, onProgress),
       },
-    },
-    {
-      id: 'crm',
-      label: 'Connecting CRM',
-      run: async (onProgress) => {
-        onProgress('Starting CRM server…');
-        const dbUrl = buildDatabaseUrl(config);
-        const partialStore = {
-          ...loadSecureStore(),
-          databaseUrl: dbUrl,
-          dbUser: config.user,
-          dbPassword: config.password,
-          dbName: config.database,
-          dbPort: config.port,
-          setupComplete: false,
-        };
-        saveSecureStore(partialStore);
-        saveSecureStore({ ...loadSecureStore(), setupComplete: true });
-        await launchCrm(loadSecureStore());
-        onProgress('Ready — use the welcome email password to sign in');
+      {
+        id: 'database',
+        label: 'Creating Database',
+        run: async (onProgress) => createDatabase(config, onProgress),
       },
-    },
-  ];
+      {
+        id: 'crm',
+        label: 'Starting CRM & Setting Up',
+        run: async (onProgress) => {
+          onProgress('Starting CRM server — this may take a moment…');
+          const dbUrl = buildDatabaseUrl(config);
+          saveSecureStore({
+            ...loadSecureStore(),
+            databaseUrl: dbUrl,
+            dbUser: config.user,
+            dbPassword: config.password,
+            dbName: config.database,
+            dbPort: config.port,
+            setupComplete: true,
+          });
+          // Pass all credentials — backend bootstrap creates schema, admin & modules.
+          await startCrmServer({
+            DESKTOP_DATABASE_URL: dbUrl,
+            DESKTOP_LICENSE_TOKEN: activation.licenseToken || '',
+            DESKTOP_MACHINE_HASH: activation.machineHash || '',
+            DESKTOP_COMPANY_SLUG: activation.subdomain || 'local',
+            DESKTOP_COMPANY_NAME: activation.companyName || '',
+            DESKTOP_ADMIN_EMAIL: activation.adminEmail || '',
+            DESKTOP_ADMIN_NAME: activation.adminName || '',
+            DESKTOP_ADMIN_PASSWORD_HASH: activation.adminPasswordHash || '',
+            DESKTOP_ENABLED_FEATURES: (activation.enabledFeatures || []).join(','),
+            JWT_ACCESS_SECRET: process.env.JWT_ACCESS_SECRET || 'desktop-access-secret-min-32-chars!!',
+            JWT_REFRESH_SECRET: process.env.JWT_REFRESH_SECRET || 'desktop-refresh-secret-min-32-chars!',
+            MAIL_FROM_ADDRESS: 'noreply@example.com',
+            SMTP_HOST: 'localhost',
+            SMTP_USER: 'local',
+            SMTP_PASS: 'local',
+          });
+          onProgress('Ready — use the welcome email password to sign in');
+        },
+      },
+    ];
 
-  const send = (payload: object) => mainWindow?.webContents.send('setup:progress', payload);
+    const send = (payload: object) => mainWindow?.webContents.send('setup:progress', payload);
 
-  for (let i = 0; i < steps.length; i++) {
-    const step = steps[i];
-    send({ step: i + 1, total: steps.length, label: step.label, progress: Math.round((i / steps.length) * 100), status: 'running' });
-    await step.run((msg) => send({ step: i + 1, total: steps.length, label: step.label, message: msg, progress: Math.round(((i + 0.5) / steps.length) * 100), status: 'running' }));
-    send({ step: i + 1, total: steps.length, label: step.label, progress: Math.round(((i + 1) / steps.length) * 100), status: 'done' });
-  }
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i];
+      send({ step: i + 1, total: steps.length, label: step.label, progress: Math.round((i / steps.length) * 100), status: 'running' });
+      await step.run((msg) => send({ step: i + 1, total: steps.length, label: step.label, message: msg, progress: Math.round(((i + 0.5) / steps.length) * 100), status: 'running' }));
+      send({ step: i + 1, total: steps.length, label: step.label, progress: Math.round(((i + 1) / steps.length) * 100), status: 'done' });
+    }
 
-  const finalStore = loadSecureStore();
-  const crmUrl = getCrmAppUrl(finalStore.subdomain || 'local');
-  send({ step: steps.length, total: steps.length, label: 'Ready', progress: 100, status: 'complete' });
-  return { success: true, crmUrl };
+    const finalStore = loadSecureStore();
+    const crmUrl = getCrmAppUrl(finalStore.subdomain || 'local');
+    send({ step: steps.length, total: steps.length, label: 'Ready', progress: 100, status: 'complete' });
+    return { success: true, crmUrl };
   })();
 
   try {
