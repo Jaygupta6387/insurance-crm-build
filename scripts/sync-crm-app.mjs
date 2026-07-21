@@ -5,12 +5,12 @@
  * What ships in the installer:
  *   crm-backend/
  *     crm-bootstrap.cjs   ← all backend source bundled into one opaque file
- *     node_modules/       ← npm packages (required at runtime; cannot be bundled due to native modules)
+ *     node_modules/       ← npm packages (required at runtime for native modules)
  *     prisma/             ← schemas + migrations (needed for DB bootstrap)
  *     package.json        ← required for node module resolution
  *   crm-frontend/dist/    ← compiled frontend assets
  *
- * Raw source code (src/) is NOT copied — it is compiled away into crm-bootstrap.cjs.
+ * Raw source code (src/) is NOT shipped — it is compiled into crm-bootstrap.cjs.
  *
  * Override source path (CI): CRM_APP_PATH=/path/to/crm-app node scripts/sync-crm-app.mjs
  */
@@ -44,12 +44,16 @@ if (existsSync(bundle)) rmSync(bundle, { recursive: true, force: true });
 mkdirSync(bundleBackend, { recursive: true });
 mkdirSync(dirname(bundleFrontendDist), { recursive: true });
 
-// ── Copy only runtime-required non-source files ────────────────────────────
-// Raw source (src/) is intentionally NOT copied — it will be bundled below.
+// ── Copy runtime assets AND source into bundle ─────────────────────────────
+// We need src/ in the bundle dir so esbuild (run from bundleBackend) can
+// resolve local requires including the Prisma-generated clients which land
+// in bundleBackend/src/generated/ after `prisma generate`.
+console.log('→ Copying backend source and runtime assets...');
+
+// Non-source runtime files
 const RUNTIME_DIRS = ['prisma', 'scripts'];
 const RUNTIME_FILES = ['package.json', 'package-lock.json'];
 
-console.log('→ Copying runtime assets (prisma, package.json)...');
 for (const dir of RUNTIME_DIRS) {
   const src = join(crmBackend, dir);
   if (existsSync(src)) {
@@ -65,19 +69,38 @@ for (const file of RUNTIME_FILES) {
   }
 }
 
+// Source (needed for esbuild; will be deleted after bundling)
+// Skip: node_modules, logs, .git, generated (Prisma will regenerate fresh)
+cpSync(join(crmBackend, 'src'), join(bundleBackend, 'src'), {
+  recursive: true,
+  filter: (srcPath) => {
+    const rel = srcPath.replace(join(crmBackend, 'src'), '').replace(/^[/\\]/, '');
+    if (!rel) return true;
+    const parts = rel.split(/[/\\]/);
+    // Skip stale generated Prisma clients — regenerated below
+    if (parts[0] === 'generated') return false;
+    return true;
+  },
+});
+console.log('  ✓ src/ (temporary — removed after bundling)');
+
 // ── Install backend dependencies ───────────────────────────────────────────
 console.log('→ Installing backend dependencies...');
 run('npm ci --ignore-scripts', bundleBackend);
 
 // ── Generate Prisma clients ────────────────────────────────────────────────
+// Prisma outputs to src/generated/ relative to prisma/ → bundleBackend/src/generated/
+// This means esbuild (running from bundleBackend) can resolve all local requires.
 console.log('→ Generating Prisma clients...');
 run('npx prisma generate --schema=prisma/company.prisma', bundleBackend);
 run('npx prisma generate --schema=prisma/superadmin.prisma', bundleBackend);
 
-// ── Bundle backend source into a single opaque file ───────────────────────
-// Uses esbuild installed in the desktop project (devDependency).
-// All local require() chains from src/ are inlined; npm packages stay external.
-// The result is a single crm-bootstrap.cjs — no src/ shipped in the installer.
+// ── Bundle all source into a single opaque file ────────────────────────────
+// Run esbuild FROM bundleBackend so it can find:
+//   - src/**/*.js  (business logic, copied above)
+//   - src/generated/**  (Prisma clients, generated above)
+// npm packages remain external (--packages=external).
+// After bundling, src/ is deleted so no readable source ships.
 console.log('→ Bundling backend source into crm-bootstrap.cjs...');
 const esbuildBin = join(root, 'node_modules', '.bin', 'esbuild');
 const outFile = join(bundleBackend, 'crm-bootstrap.cjs');
@@ -93,11 +116,15 @@ run(
     '--keep-names',
     `--outfile="${outFile}"`,
   ].join(' '),
-  crmBackend,
+  bundleBackend,  // ← run from bundle dir so all src/ paths resolve correctly
 );
 
 const bundleSize = (statSync(outFile).size / 1024).toFixed(1);
-console.log(`  ✓ crm-bootstrap.cjs (${bundleSize} KB) — src/ not shipped`);
+console.log(`  ✓ crm-bootstrap.cjs (${bundleSize} KB)`);
+
+// ── Remove src/ — source must not ship in the installer ───────────────────
+rmSync(join(bundleBackend, 'src'), { recursive: true, force: true });
+console.log('  ✓ src/ removed — no raw source in bundle');
 
 // ── Build frontend ─────────────────────────────────────────────────────────
 if (!existsSync(join(crmFrontend, 'package.json'))) {
