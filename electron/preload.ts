@@ -28,6 +28,28 @@ export interface DesktopApi {
   onUpdateStatus: (cb: (data: { status: string; version?: string; percent?: number; message?: string }) => void) => () => void;
   installUpdate: () => Promise<void>;
   checkForUpdates: () => Promise<void>;
+
+  // ── Phase 3: Windows Service ────────────────────────────────────────────────
+  getServiceStatus: () => Promise<string>;
+  installService: () => Promise<{ success: boolean; message: string }>;
+  uninstallService: () => Promise<{ success: boolean; message: string }>;
+  startService: () => Promise<{ success: boolean; message: string }>;
+  stopService: () => Promise<{ success: boolean; message: string }>;
+  restartService: () => Promise<{ success: boolean; message: string }>;
+
+  // ── Phase 3: Server Discovery ───────────────────────────────────────────────
+  discoverServer: (timeoutMs?: number) => Promise<{
+    success: boolean;
+    data?: { ip: string; port: number; serverId: string; serverName: string; version: string };
+    message?: string;
+  }>;
+
+  // ── Phase 3: Tray ───────────────────────────────────────────────────────────
+  updateTrayInfo: (info: Record<string, unknown>) => Promise<void>;
+
+  // ── Phase 3: Socket events from server ─────────────────────────────────────
+  onSocketConnected: (cb: (data: { serverUrl: string }) => void) => () => void;
+  onSocketDisconnected: (cb: (data: { reason: string }) => void) => () => void;
 }
 
 const api: DesktopApi = {
@@ -64,6 +86,32 @@ const api: DesktopApi = {
   },
   installUpdate: () => ipcRenderer.invoke('updater:install'),
   checkForUpdates: () => ipcRenderer.invoke('updater:check'),
+
+  // ── Phase 3: Windows Service ────────────────────────────────────────────────
+  getServiceStatus:  () => ipcRenderer.invoke('service:status'),
+  installService:    () => ipcRenderer.invoke('service:install'),
+  uninstallService:  () => ipcRenderer.invoke('service:uninstall'),
+  startService:      () => ipcRenderer.invoke('service:start'),
+  stopService:       () => ipcRenderer.invoke('service:stop'),
+  restartService:    () => ipcRenderer.invoke('service:restart'),
+
+  // ── Phase 3: Server Discovery ───────────────────────────────────────────────
+  discoverServer: (timeoutMs) => ipcRenderer.invoke('discovery:start', timeoutMs),
+
+  // ── Phase 3: Tray ───────────────────────────────────────────────────────────
+  updateTrayInfo: (info) => ipcRenderer.invoke('tray:update-info', info),
+
+  // ── Phase 3: Socket events ──────────────────────────────────────────────────
+  onSocketConnected: (cb) => {
+    const handler = (_: unknown, data: { serverUrl: string }) => cb(data);
+    ipcRenderer.on('socket:connected', handler);
+    return () => ipcRenderer.removeListener('socket:connected', handler);
+  },
+  onSocketDisconnected: (cb) => {
+    const handler = (_: unknown, data: { reason: string }) => cb(data);
+    ipcRenderer.on('socket:disconnected', handler);
+    return () => ipcRenderer.removeListener('socket:disconnected', handler);
+  },
 };
 
 contextBridge.exposeInMainWorld('desktop', api);

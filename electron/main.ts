@@ -21,7 +21,13 @@ import { createDatabase, buildDatabaseUrl } from './services/db-bootstrap.servic
 import { startCrmServer, stopCrmServer, getCrmAppUrl } from './services/crm-server.service';
 import { initAutoUpdater, installUpdate, checkForUpdates } from './services/updater.service';
 
+// ── Phase 3: Enterprise On-Premise Services ───────────────────────────────────
+import { SystemTrayService } from './services/system-tray.service';
+import { WindowsServiceManager } from './services/windows-service-manager.service';
+
 let mainWindow: BrowserWindow | null = null;
+let trayService: SystemTrayService | null = null;
+let windowsServiceManager: WindowsServiceManager | null = null;
 let setupRunInFlight: Promise<{ success: boolean; crmUrl: string }> | null = null;
 let lastPasswordVerifiedAt = 0;
 const PASSWORD_VERIFY_TTL_MS = 5 * 60 * 1000;
@@ -272,6 +278,36 @@ app.whenReady().then(() => {
   mainWindow = createWindow();
   initAutoUpdater(mainWindow);
 
+  // ── Phase 3: System Tray — hide-to-tray instead of close ─────────────────
+  trayService = new SystemTrayService(mainWindow);
+  trayService.init();
+
+  // Wire up optional tray actions
+  trayService.setCallbacks({
+    onRestartBackend: async () => {
+      stopCrmServer();
+      await new Promise((r) => setTimeout(r, 1500));
+      const store = loadSecureStore();
+      if (store.setupComplete) await launchCrm(store).catch(console.error);
+    },
+    onViewLogs: () => {
+      const { shell: electronShell } = require('electron');
+      const { join: pathJoin } = require('path');
+      const logsDir = pathJoin(app.getPath('userData'), 'logs');
+      electronShell.openPath(logsDir).catch(() => {});
+    },
+  });
+
+  // Intercept window close — hide to tray instead of quitting
+  mainWindow.on('close', (e) => {
+    if (trayService) {
+      trayService.handleWindowClose(e);
+    }
+  });
+
+  // ── Phase 3: Windows Service Manager ─────────────────────────────────────
+  windowsServiceManager = new WindowsServiceManager();
+
   mainWindow.webContents.once('did-finish-load', () => {
     void resolveBootstrapState()
       .then((state) => mainWindow?.webContents.send('app:state', state))
@@ -284,7 +320,13 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-  stopCrmServer();
+  // In server mode (non-desktop/offline) the backend is a Windows Service —
+  // never stop the backend when Electron quits.
+  // In desktop (single-machine) mode we do stop the embedded CRM server.
+  if (process.env.CRM_MODE !== 'server') {
+    stopCrmServer();
+  }
+  trayService?.destroy();
   if (process.platform !== 'darwin') app.quit();
 });
 
@@ -492,6 +534,56 @@ ipcMain.handle('settings:reveal-db-credentials', () => {
 });
 
 ipcMain.handle('app:openExternal', (_e, url: string) => shell.openExternal(url));
+
+// ── Phase 3: Windows Service IPC handlers ────────────────────────────────────
+
+ipcMain.handle('service:status', async () => {
+  return windowsServiceManager?.getStatus() ?? 'NOT_INSTALLED';
+});
+
+ipcMain.handle('service:install', async () => {
+  if (!windowsServiceManager) return { success: false, message: 'Service manager not initialised' };
+  return windowsServiceManager.install();
+});
+
+ipcMain.handle('service:uninstall', async () => {
+  if (!windowsServiceManager) return { success: false, message: 'Service manager not initialised' };
+  return windowsServiceManager.uninstall();
+});
+
+ipcMain.handle('service:start', async () => {
+  if (!windowsServiceManager) return { success: false, message: 'Service manager not initialised' };
+  return windowsServiceManager.start();
+});
+
+ipcMain.handle('service:stop', async () => {
+  if (!windowsServiceManager) return { success: false, message: 'Service manager not initialised' };
+  return windowsServiceManager.stop();
+});
+
+ipcMain.handle('service:restart', async () => {
+  if (!windowsServiceManager) return { success: false, message: 'Service manager not initialised' };
+  return windowsServiceManager.restart();
+});
+
+// ── Phase 3: Server discovery IPC handlers ────────────────────────────────────
+
+ipcMain.handle('discovery:start', async (_e, timeoutMs?: number) => {
+  const { UDPDiscoveryClientService } = await import('./services/udp-discovery-client.service');
+  const store  = loadSecureStore();
+  const secret = store.licenseToken?.slice(0, 32) || '';
+  const client = new UDPDiscoveryClientService(secret);
+  try {
+    const result = await client.discover(timeoutMs ?? 15_000);
+    return { success: true, data: result };
+  } catch (err) {
+    return { success: false, message: err instanceof Error ? err.message : String(err) };
+  }
+});
+
+ipcMain.handle('tray:update-info', (_e, info: Record<string, unknown>) => {
+  trayService?.updateServerInfo(info as Parameters<SystemTrayService['updateServerInfo']>[0]);
+});
 
 ipcMain.handle('dialog:select-document-root', async () => {
   if (!mainWindow) throw new Error('Application window is not ready');
