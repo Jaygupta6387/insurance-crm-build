@@ -21,9 +21,11 @@ import { createDatabase, buildDatabaseUrl } from './services/db-bootstrap.servic
 import { startCrmServer, stopCrmServer, getCrmAppUrl } from './services/crm-server.service';
 import { initAutoUpdater, installUpdate, checkForUpdates } from './services/updater.service';
 
-// ── Phase 3: Enterprise On-Premise Services ───────────────────────────────────
+// ── Phase 3/5: Enterprise On-Premise Services ─────────────────────────────────
 import { SystemTrayService } from './services/system-tray.service';
 import { WindowsServiceManager } from './services/windows-service-manager.service';
+import { getInstallationMode } from './services/installation-mode.service';
+import { ServerConnectionService } from './services/server-connection.service';
 
 let mainWindow: BrowserWindow | null = null;
 let trayService: SystemTrayService | null = null;
@@ -274,21 +276,94 @@ const resolveBootstrapState = async (): Promise<'activation' | 'setup' | 'crm' |
   return 'crm';
 };
 
+// ── Phase 5: SERVER mode — connect to local Windows Service backend ───────────
+/**
+ * SERVER mode: Electron connects to localhost.
+ * If the backend is starting, show "Starting Server..." and retry every 3s.
+ * Once connected, load the CRM dashboard.
+ */
+async function _connectToLocalServer() {
+  const LOCAL_URL = `http://127.0.0.1:${process.env.CRM_SERVER_PORT || 5000}`;
+  const MAX_WAIT_MS = 120_000;
+  const RETRY_MS   = 3_000;
+  const start      = Date.now();
+
+  const attempt = async (): Promise<void> => {
+    try {
+      const res = await fetch(`${LOCAL_URL}/api/server/info`, { signal: AbortSignal.timeout(2_000) });
+      if (res.ok) {
+        const body = await res.json() as { success: boolean; data?: { app: string } };
+        if (body.success && body.data?.app === 'InsuredHub') {
+          mainWindow?.webContents.send('app:state', 'ready');
+          mainWindow?.loadURL(`${LOCAL_URL}/local/login`);
+          console.log('[main] Connected to local server:', LOCAL_URL);
+          return;
+        }
+      }
+    } catch { /* not ready yet */ }
+
+    if (Date.now() - start >= MAX_WAIT_MS) {
+      mainWindow?.webContents.send('app:state', 'server-error');
+      mainWindow?.webContents.send('app:error', { message: 'Backend did not start within 2 minutes. Check the Windows Service.' });
+      return;
+    }
+
+    mainWindow?.webContents.send('app:state', 'server-starting');
+    mainWindow?.webContents.send('server:discovery-status', {
+      message: 'Starting InsuredHub Server...',
+      stage:   'server-starting',
+    });
+    setTimeout(() => void attempt(), RETRY_MS);
+  };
+
+  void attempt();
+}
+
+// ── Phase 5: CLIENT mode — full discovery pipeline ────────────────────────────
+/**
+ * CLIENT mode: saved server → UDP discovery → manual entry.
+ * Once connected, loads the CRM dashboard from the remote server.
+ */
+async function _discoverAndConnect() {
+  if (!serverConnectionService || !mainWindow) return;
+  try {
+    const result = await serverConnectionService.discoverAndConnect();
+    console.log(`[main] Server connected (${result.method}): ${result.serverUrl}`);
+    mainWindow?.webContents.send('app:state', 'ready');
+    mainWindow?.loadURL(`${result.serverUrl}/local/login`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[main] Server discovery failed:', message);
+    mainWindow?.webContents.send('app:state', 'server-error');
+    mainWindow?.webContents.send('app:error', { message });
+  }
+}
+
 app.whenReady().then(() => {
   mainWindow = createWindow();
   initAutoUpdater(mainWindow);
 
-  // ── Phase 3: System Tray — hide-to-tray instead of close ─────────────────
+  // ── Phase 5: Resolve installation mode ───────────────────────────────────
+  const installMode = getInstallationMode();
+  console.log(`[main] Installation mode: ${installMode.getMode()}`);
+
+  // ── Phase 3/5: System Tray — hide-to-tray instead of close ───────────────
   trayService = new SystemTrayService(mainWindow);
   trayService.init();
 
   // Wire up optional tray actions
   trayService.setCallbacks({
     onRestartBackend: async () => {
-      stopCrmServer();
-      await new Promise((r) => setTimeout(r, 1500));
-      const store = loadSecureStore();
-      if (store.setupComplete) await launchCrm(store).catch(console.error);
+      if (installMode.isDesktop()) {
+        // Desktop mode: restart embedded CRM server
+        stopCrmServer();
+        await new Promise((r) => setTimeout(r, 1500));
+        const store = loadSecureStore();
+        if (store.setupComplete) await launchCrm(store).catch(console.error);
+      } else if (installMode.isServer()) {
+        // Server mode: restart via Windows Service manager
+        windowsServiceManager?.restart();
+      }
     },
     onViewLogs: () => {
       const { shell: electronShell } = require('electron');
@@ -305,13 +380,36 @@ app.whenReady().then(() => {
     }
   });
 
-  // ── Phase 3: Windows Service Manager ─────────────────────────────────────
+  // ── Phase 3/5: Windows Service Manager ────────────────────────────────────
   windowsServiceManager = new WindowsServiceManager();
 
+  // ── Phase 5: Server Connection Service (CLIENT + SERVER modes) ────────────
+  if (!installMode.isDesktop()) {
+    serverConnectionService = new ServerConnectionService(mainWindow, installMode);
+    serverConnectionService.on('status', ({ message, stage }: { message: string; stage: string }) => {
+      console.log(`[server-connection] ${stage}: ${message}`);
+      trayService?.updateServerInfo({ status: stage });
+    });
+  }
+
   mainWindow.webContents.once('did-finish-load', () => {
-    void resolveBootstrapState()
-      .then((state) => mainWindow?.webContents.send('app:state', state))
-      .catch(() => mainWindow?.webContents.send('app:state', 'activation'));
+    // Inform renderer of the installation mode so it can adapt its UI
+    mainWindow?.webContents.send('app:install-mode', installMode.getInfo());
+
+    if (installMode.isDesktop()) {
+      // Legacy DESKTOP behaviour — resolve normal bootstrap state
+      void resolveBootstrapState()
+        .then((state) => mainWindow?.webContents.send('app:state', state))
+        .catch(() => mainWindow?.webContents.send('app:state', 'activation'));
+    } else if (installMode.isServer()) {
+      // SERVER mode — Electron connects to the local Windows Service backend
+      mainWindow?.webContents.send('app:state', 'server-connecting');
+      void _connectToLocalServer();
+    } else if (installMode.isClient()) {
+      // CLIENT mode — discover the remote server
+      mainWindow?.webContents.send('app:state', 'discovering');
+      void _discoverAndConnect();
+    }
   });
 
   app.on('activate', () => {
@@ -583,6 +681,41 @@ ipcMain.handle('discovery:start', async (_e, timeoutMs?: number) => {
 
 ipcMain.handle('tray:update-info', (_e, info: Record<string, unknown>) => {
   trayService?.updateServerInfo(info as Parameters<SystemTrayService['updateServerInfo']>[0]);
+});
+
+// ── Phase 5: Installation mode IPC ───────────────────────────────────────────
+
+ipcMain.handle('install-mode:get', () => {
+  return getInstallationMode().getInfo();
+});
+
+ipcMain.handle('install-mode:set', (_e, mode: string) => {
+  try {
+    getInstallationMode().setMode(mode as 'SERVER' | 'CLIENT' | 'DESKTOP');
+    return { success: true, mode };
+  } catch (err) {
+    return { success: false, message: err instanceof Error ? err.message : String(err) };
+  }
+});
+
+// ── Phase 5: Server connection IPC ───────────────────────────────────────────
+
+ipcMain.handle('server:connect', async (_e, serverUrl: string) => {
+  if (!serverConnectionService) {
+    return { success: false, message: 'Server connection service not available in this install mode' };
+  }
+  const info = await serverConnectionService.probeServer(serverUrl);
+  if (!info) return { success: false, message: 'Cannot reach server at ' + serverUrl };
+  serverConnectionService.getSavedServerUrl();
+  return { success: true, data: info };
+});
+
+ipcMain.handle('server:get-saved', () => {
+  return serverConnectionService?.getSavedServerUrl() ?? null;
+});
+
+ipcMain.handle('server:clear-saved', () => {
+  serverConnectionService?.clearSavedServerUrl();
 });
 
 ipcMain.handle('dialog:select-document-root', async () => {

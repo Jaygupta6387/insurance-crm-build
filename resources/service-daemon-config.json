@@ -1,0 +1,15 @@
+{
+  "_comment": "InsuredHub CRM — Windows Service Daemon Configuration",
+  "_note": "Edit this file after installation to match your environment. All values can also be set as environment variables.",
+  "backendDir":    "C:\\InsuredHub\\backend",
+  "port":          5000,
+  "socketPort":    5001,
+  "dataRoot":      "C:\\InsuredHubData",
+  "logDir":        "C:\\InsuredHubData\\Logs",
+  "databaseUrl":   "postgresql://insuredhub:CHANGE_ME@localhost:5432/insuredhub?schema=public",
+  "installMode":   "SERVER",
+  "nodeEnv":       "production",
+  "companyName":   "",
+  "licenseId":     "",
+  "tenantId":      ""
+}

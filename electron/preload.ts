@@ -112,6 +112,32 @@ const api: DesktopApi = {
     ipcRenderer.on('socket:disconnected', handler);
     return () => ipcRenderer.removeListener('socket:disconnected', handler);
   },
+
+  // ── Phase 5: Installation Mode ──────────────────────────────────────────────
+  getInstallMode: () => ipcRenderer.invoke('install-mode:get'),
+  setInstallMode: (mode: string) => ipcRenderer.invoke('install-mode:set', mode),
+
+  // ── Phase 5: Server connection status ──────────────────────────────────────
+  onServerDiscoveryStatus: (cb) => {
+    const handler = (_: unknown, data: { message: string; stage: string }) => cb(data);
+    ipcRenderer.on('server:discovery-status', handler);
+    return () => ipcRenderer.removeListener('server:discovery-status', handler);
+  },
+  onInstallMode: (cb) => {
+    const handler = (_: unknown, info: Record<string, unknown>) => cb(info);
+    ipcRenderer.on('app:install-mode', handler);
+    return () => ipcRenderer.removeListener('app:install-mode', handler);
+  },
+
+  // Phase 5: Manual server address response (used in CLIENT discovery flow)
+  respondManualAddress: (address: string) => ipcRenderer.send('server:manual-address-response', address),
+
+  // Phase 5: Error channel
+  onAppError: (cb) => {
+    const handler = (_: unknown, data: { message: string }) => cb(data);
+    ipcRenderer.on('app:error', handler);
+    return () => ipcRenderer.removeListener('app:error', handler);
+  },
 };
 
 contextBridge.exposeInMainWorld('desktop', api);
