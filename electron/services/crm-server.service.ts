@@ -5,6 +5,7 @@ import { app } from 'electron';
 import { getCrmBackendPath, getCrmFrontendDistPath } from './app-paths.service';
 import { crmChildEnv, getNodeExecutable } from './process-spawn.service';
 import getPort from './get-port';
+import { getInstallationMode } from './installation-mode.service';
 
 let crmProcess: ChildProcess | null = null;
 let crmPort = 0;
@@ -45,7 +46,10 @@ export const startCrmServer = async (env: Record<string, string>): Promise<numbe
     stopCrmServer();
   }
 
-  crmPort = await getPort();
+  // Admin PC uses a stable port so employees can type a known address.
+  // Desktop / single-PC can use any free port.
+  const preferredPort = getInstallationMode().isServer() ? 18765 : 0;
+  crmPort = await getPort(preferredPort);
   const backendPath = getCrmBackendPath();
   const bootstrap = join(backendPath, 'crm-bootstrap.cjs');
   const entry = join(backendPath, 'src/server.js');
@@ -65,36 +69,67 @@ export const startCrmServer = async (env: Record<string, string>): Promise<numbe
     );
   }
 
-  const requiredModules = ['bcryptjs', 'zod', 'winston', '@prisma/client', 'jsonwebtoken'];
+  const requiredModules = ['bcryptjs', 'zod', 'winston', '@prisma/client', 'jsonwebtoken', 'pg', 'prisma'];
   const missingMods = requiredModules.filter((m) => !existsSync(join(backendPath, 'node_modules', m)));
   if (missingMods.length) {
     throw new Error(`CRM install is incomplete (missing: ${missingMods.join(', ')}). Reinstall the latest version.`);
+  }
+  if (!existsSync(join(backendPath, 'node_modules', 'prisma', 'build', 'index.js'))) {
+    throw new Error('Prisma CLI missing from install. Reinstall the latest InsureCRM Desktop.');
   }
 
   lastCrmOutput = '';
   let exited = false;
   let exitCode: number | null = null;
 
+  const scriptPath = existsSync(bootstrap) ? bootstrap : entry;
+  const nodeExe = getNodeExecutable();
+  const installMode = getInstallationMode();
+  const shareOnWifi = installMode.isServer();
+
   const childEnv = crmChildEnv({
     ...env,
     CRM_MODE: 'desktop',
+    INSTALL_MODE: installMode.hasChosenMode() ? installMode.getMode() : 'DESKTOP',
+    // Admin PC: listen on all interfaces + UDP so employees on the same Wi‑Fi find us.
+    // Desktop / single-PC: localhost only (DESKTOP_LAN_SHARE=false).
+    DESKTOP_LAN_SHARE: shareOnWifi ? 'true' : 'false',
+    DISCOVERY_ENABLED: shareOnWifi ? 'true' : (env.DISCOVERY_ENABLED || 'false'),
+    // Stable identity lets Employee PCs recognize this Admin after DHCP changes.
+    DESKTOP_SERVER_ID: env.DESKTOP_SERVER_ID || env.DESKTOP_MACHINE_HASH || '',
+    DEPLOYMENT_MODE: shareOnWifi ? 'SELF_HOSTED' : (env.DEPLOYMENT_MODE || 'OFFLINE'),
     PORT: String(crmPort),
     NODE_ENV: 'production',
+    // Packaged Electron always marks the CRM child as packaged — blocks SKIP_LICENSE_*.
+    INSURECRM_PACKAGED: app.isPackaged ? 'true' : 'false',
+    // Meaningful auth brute-force limit (LAN-reachable Admin PCs especially).
+    RATE_LIMIT_WINDOW_MS: '900000',
+    RATE_LIMIT_MAX: shareOnWifi ? '5000' : '2000',
+    AUTH_RATE_LIMIT_MAX: shareOnWifi ? '30' : '20',
     FRONTEND_URL: `http://127.0.0.1:${crmPort}`,
     FRONTEND_RESET_PASSWORD_URL: `http://127.0.0.1:${crmPort}`,
     DATABASE_URL: env.DESKTOP_DATABASE_URL || env.DATABASE_URL || '',
     DESKTOP_DATABASE_URL: env.DESKTOP_DATABASE_URL || env.DATABASE_URL || '',
+    DESKTOP_BACKEND_ROOT: backendPath,
+    DESKTOP_NODE_BINARY: nodeExe,
     CRM_LOG_DIR: logDir,
     DESKTOP_FRONTEND_DIST: frontendDist,
     LICENSE_CLOUD_API_URL: env.LICENSE_CLOUD_API_URL || CLOUD_LICENSE_API,
+    // Persist last successful license heartbeat under userData (offline grace).
+    DESKTOP_DATA_DIR: env.DESKTOP_DATA_DIR || app.getPath('userData'),
     // Bootstrap env — backend uses these to seed schema/admin/modules on first start
     DESKTOP_ADMIN_EMAIL: env.DESKTOP_ADMIN_EMAIL || '',
     DESKTOP_ADMIN_NAME: env.DESKTOP_ADMIN_NAME || '',
     DESKTOP_ENABLED_FEATURES: env.DESKTOP_ENABLED_FEATURES || '',
+    DESKTOP_PLAN_TYPE: env.DESKTOP_PLAN_TYPE || '',
+    DESKTOP_SUBSCRIPTION_END: env.DESKTOP_SUBSCRIPTION_END || '',
+    DESKTOP_MAX_EMPLOYEES: env.DESKTOP_MAX_EMPLOYEES || '',
   });
 
-  const scriptPath = existsSync(bootstrap) ? bootstrap : entry;
-  const nodeExe = getNodeExecutable();
+  // Never inherit local-dev license bypass into the CRM child (release or accidental shell env).
+  delete childEnv.SKIP_LICENSE_CHECK_FOR_LOCAL;
+  delete childEnv.LOCAL_DEV_ADMIN_EMAIL;
+  delete childEnv.LOCAL_DEV_ADMIN_PASSWORD;
 
   // utilityProcess passes Chromium --type=utility flags that break ELECTRON_RUN_AS_NODE on Windows.
   crmProcess = spawn(nodeExe, [scriptPath], {
@@ -146,6 +181,8 @@ export const stopCrmServer = (): void => {
 };
 
 export const getCrmUrl = (): string => `http://127.0.0.1:${crmPort}`;
+
+export const getCrmPort = (): number => crmPort;
 
 export const getCrmAppUrl = (companySlug = 'local'): string => {
   const slug = encodeURIComponent(companySlug.replace(/^\/+|\/+$/g, '') || 'local');

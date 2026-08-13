@@ -108,7 +108,7 @@ function resolveEntryScript(cfg) {
 }
 
 function buildEnv(cfg) {
-  return {
+  const env = {
     ...process.env,
     INSTALL_MODE:     cfg.installMode || 'SERVER',
     NODE_ENV:         cfg.nodeEnv     || 'production',
@@ -118,10 +118,16 @@ function buildEnv(cfg) {
     LOG_DIR:          cfg.logDir      || '',
     DATABASE_URL:     cfg.databaseUrl || '',
     CRM_MODE:         'server',
+    INSURECRM_PACKAGED: 'true',
+    DESKTOP_LAN_SHARE: 'true',
     BROADCAST_COMPANY_NAME: cfg.companyName || os.hostname(),
     BROADCAST_LICENSE_ID:   cfg.licenseId   || '',
     BROADCAST_TENANT_ID:    cfg.tenantId    || '',
   };
+  delete env.SKIP_LICENSE_CHECK_FOR_LOCAL;
+  delete env.LOCAL_DEV_ADMIN_EMAIL;
+  delete env.LOCAL_DEV_ADMIN_PASSWORD;
+  return env;
 }
 
 function startBackend() {

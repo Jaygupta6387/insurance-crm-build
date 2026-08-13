@@ -27,6 +27,10 @@ export interface SecureStoreData {
   maxEmployees?: number;
   enabledFeatures?: string[];
   featureMap?: Record<string, string>;
+  savedServerUrl?: string;
+  /** Per-install JWT signing secrets (never use shared defaults in release). */
+  jwtAccessSecret?: string;
+  jwtRefreshSecret?: string;
 }
 
 const STORE_FILENAME = 'secure-store.enc';
@@ -158,4 +162,54 @@ export const getDbCredentialsFromStore = (): {
     password: store.dbPassword || '',
     database: store.dbName || '',
   };
+};
+
+const HARDCODED_JWT_PREFIXES = [
+  'desktop-access-secret',
+  'desktop-refresh-secret',
+  'insuredhub-offline-secret',
+  'change_me',
+  'change-me',
+];
+
+const isWeakJwtSecret = (value?: string): boolean => {
+  if (!value || value.length < 32) return true;
+  const lower = value.toLowerCase();
+  return HARDCODED_JWT_PREFIXES.some((p) => lower.includes(p));
+};
+
+/**
+ * Return durable per-install JWT secrets (create + persist on first use).
+ * Never falls back to shared hardcoded strings.
+ */
+export const ensureDesktopJwtSecrets = (): { accessSecret: string; refreshSecret: string } => {
+  const store = loadSecureStore();
+  let access = store.jwtAccessSecret;
+  let refresh = store.jwtRefreshSecret;
+
+  // Prefer env only in unpackaged local electron-vite runs when already set strongly.
+  if (!app.isPackaged) {
+    if (!isWeakJwtSecret(process.env.JWT_ACCESS_SECRET)) access = process.env.JWT_ACCESS_SECRET;
+    if (!isWeakJwtSecret(process.env.JWT_REFRESH_SECRET)) refresh = process.env.JWT_REFRESH_SECRET;
+  }
+
+  let changed = false;
+  if (isWeakJwtSecret(access)) {
+    access = randomBytes(48).toString('hex');
+    changed = true;
+  }
+  if (isWeakJwtSecret(refresh) || refresh === access) {
+    refresh = randomBytes(48).toString('hex');
+    changed = true;
+  }
+
+  if (changed) {
+    saveSecureStore({
+      ...loadSecureStore(),
+      jwtAccessSecret: access,
+      jwtRefreshSecret: refresh,
+    });
+  }
+
+  return { accessSecret: access!, refreshSecret: refresh! };
 };

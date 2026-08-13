@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, shell, powerMonitor } from 'electron';
 import { join } from 'path';
 import {
   loadSecureStore,
@@ -8,17 +8,18 @@ import {
   getLoginCredentials,
   clearLoginCredentials,
   getDbCredentialsFromStore,
+  ensureDesktopJwtSecrets,
 } from './services/secure-store.service';
 import { collectFingerprint } from './services/fingerprint.service';
-import { activateLicense, heartbeatLicenseWithRetry, requestTransfer } from './services/license.service';
+import { activateLicense, heartbeatLicenseWithRetry, requestTransfer, lookupDeviceByHash } from './services/license.service';
 import {
   getDefaultPostgresConfig,
-  installPostgres,
   resetPostgresData,
   ensurePostgresRunning,
+  stopEmbeddedPostgres,
 } from './services/postgres-installer';
 import { createDatabase, buildDatabaseUrl } from './services/db-bootstrap.service';
-import { startCrmServer, stopCrmServer, getCrmAppUrl } from './services/crm-server.service';
+import { startCrmServer, stopCrmServer, getCrmAppUrl, getCrmPort } from './services/crm-server.service';
 import { initAutoUpdater, installUpdate, checkForUpdates } from './services/updater.service';
 
 // ── Phase 3/5: Enterprise On-Premise Services ─────────────────────────────────
@@ -30,6 +31,7 @@ import { ServerConnectionService } from './services/server-connection.service';
 let mainWindow: BrowserWindow | null = null;
 let trayService: SystemTrayService | null = null;
 let windowsServiceManager: WindowsServiceManager | null = null;
+let serverConnectionService: ServerConnectionService | null = null;
 let setupRunInFlight: Promise<{ success: boolean; crmUrl: string }> | null = null;
 let lastPasswordVerifiedAt = 0;
 const PASSWORD_VERIFY_TTL_MS = 5 * 60 * 1000;
@@ -99,6 +101,14 @@ const createWindow = (): BrowserWindow => {
 
   win.once('ready-to-show', () => win.show());
 
+  // Open http(s) links from CRM (e.g. Gmail App Password help) in the system browser
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) {
+      void shell.openExternal(url);
+    }
+    return { action: 'deny' };
+  });
+
   if (process.env.ELECTRON_RENDERER_URL) {
     win.loadURL(process.env.ELECTRON_RENDERER_URL);
   } else {
@@ -114,22 +124,168 @@ const cacheSubscriptionFromLicense = (
     plan?: string;
     plan_type?: string;
     user_limit?: number;
-    subscription_end?: string;
+    subscription_end?: string | null;
     features?: Record<string, string>;
     enabled_features?: string[];
   }
 ) => {
   const plan = data.plan || data.plan_type;
   const hasFeatures = data.features || data.enabled_features;
-  if (!plan && !data.subscription_end && data.user_limit == null && !hasFeatures) return store;
+  const hasSubscriptionEnd = Object.prototype.hasOwnProperty.call(data, 'subscription_end');
+  if (!plan && !hasSubscriptionEnd && data.user_limit == null && !hasFeatures) return store;
   return {
     ...store,
     planType: plan || store.planType,
-    subscriptionEnd: data.subscription_end || store.subscriptionEnd,
+    // Always prefer cloud value when present (including null after clearing expiry).
+    ...(hasSubscriptionEnd
+      ? { subscriptionEnd: data.subscription_end || undefined }
+      : {}),
     maxEmployees: data.user_limit ?? store.maxEmployees,
     ...(data.enabled_features ? { enabledFeatures: data.enabled_features } : {}),
     ...(data.features ? { featureMap: data.features } : {}),
   };
+};
+
+const isSubscriptionExpired = (subscriptionEnd?: string | null): boolean => {
+  if (!subscriptionEnd) return false;
+  const end = new Date(subscriptionEnd);
+  if (Number.isNaN(end.getTime())) return false;
+  return end.getTime() < Date.now();
+};
+
+const isLicenseRejectionError = (err: unknown): boolean => {
+  const statusCode =
+    err && typeof err === 'object' && 'statusCode' in err
+      ? Number((err as { statusCode?: number }).statusCode)
+      : undefined;
+  if (statusCode === 401 || statusCode === 403) return true;
+
+  const message = err instanceof Error ? err.message : String(err);
+  const networkish = /timeout|ECONN|ENOTFOUND|ENETUNREACH|network|cannot reach|aborted/i.test(
+    message
+  );
+  if (networkish) return false;
+
+  return /\b(invalid|revoked|expired|suspended|blocked|inactive|deactivated)\b|unauthorized|forbidden/i.test(
+    message
+  );
+};
+
+const lockAppForLicense = (reason: string): void => {
+  console.warn('[license] locking app:', reason);
+  stopCrmServer();
+  mainWindow?.webContents.send('app:state', 'locked');
+  // Reload shell UI so LockScreen is visible even if CRM URL was loaded in the window.
+  if (mainWindow && !mainWindow.webContents.getURL().includes('index.html') && !process.env.ELECTRON_RENDERER_URL) {
+    reloadShellUI();
+  } else if (mainWindow?.webContents.getURL().includes('localhost') || mainWindow?.webContents.getURL().includes('127.0.0.1')) {
+    reloadShellUI();
+  }
+};
+
+/**
+ * Ask Super Admin for current entitlement and refresh the local subscription cache.
+ * Must run BEFORE locking on a stale local subscriptionEnd (renewals would never unlock otherwise).
+ */
+const refreshEntitlementFromCloud = async (): Promise<{
+  store: ReturnType<typeof loadSecureStore>;
+  cloudOk: boolean;
+  rejection?: Error;
+}> => {
+  let store = loadSecureStore();
+  const licenseToken = store.licenseToken;
+  if (!licenseToken) {
+    return { store, cloudOk: false };
+  }
+
+  try {
+    const fp = await collectFingerprint();
+    const machineHash = store.machineHash || fp.machineHash;
+    if (!store.machineHash) {
+      saveSecureStore({ ...store, machineHash });
+      store = loadSecureStore();
+    }
+
+    const hb = await heartbeatLicenseWithRetry(licenseToken, machineHash, 2);
+    const refreshed = cacheSubscriptionFromLicense(
+      loadSecureStore(),
+      hb as {
+        plan?: string;
+        plan_type?: string;
+        user_limit?: number;
+        subscription_end?: string | null;
+        features?: Record<string, string>;
+        enabled_features?: string[];
+      }
+    );
+    saveSecureStore(refreshed);
+    return { store: loadSecureStore(), cloudOk: true };
+  } catch (err) {
+    const rejection = err instanceof Error ? err : new Error(String(err));
+    if (isLicenseRejectionError(err)) {
+      return { store: loadSecureStore(), cloudOk: false, rejection };
+    }
+    console.warn('[license] entitlement refresh soft-fail:', rejection.message);
+    return { store: loadSecureStore(), cloudOk: false };
+  }
+};
+
+let licenseWatchTimer: ReturnType<typeof setInterval> | null = null;
+
+const runLicenseWatchTick = async (): Promise<void> => {
+  const store = loadSecureStore();
+  if (!store.licenseToken || !store.setupComplete) return;
+
+  const { store: refreshed, cloudOk, rejection } = await refreshEntitlementFromCloud();
+
+  if (rejection) {
+    lockAppForLicense(rejection.message);
+    return;
+  }
+
+  if (isSubscriptionExpired(refreshed.subscriptionEnd)) {
+    lockAppForLicense('subscription expired');
+    return;
+  }
+
+  // Offline: still enforce last-known local end date.
+  if (!cloudOk && isSubscriptionExpired(store.subscriptionEnd)) {
+    lockAppForLicense('local subscription_end passed (offline)');
+  }
+};
+
+const startLicenseWatch = (): void => {
+  if (licenseWatchTimer) return;
+  // Option B — default every 15 minutes (override with LICENSE_WATCH_INTERVAL_MS).
+  const intervalMs = parseInt(process.env.LICENSE_WATCH_INTERVAL_MS || String(15 * 60 * 1000), 10);
+  // Run once soon after start so expiry is caught without waiting a full interval.
+  void runLicenseWatchTick();
+  licenseWatchTimer = setInterval(() => {
+    void runLicenseWatchTick();
+  }, intervalMs);
+  console.log(`[license] watch started (every ${Math.round(intervalMs / 60000)} min)`);
+};
+
+/** Re-check when the PC wakes or the window is focused (still Option B). */
+const attachLicenseWatchLifecycle = (): void => {
+  let lastFocusCheckAt = 0;
+  const FOCUS_THROTTLE_MS = 60_000;
+
+  try {
+    powerMonitor.on('resume', () => {
+      console.log('[license] power resume — rechecking entitlement');
+      void runLicenseWatchTick();
+    });
+  } catch {
+    /* powerMonitor unavailable in some environments */
+  }
+
+  app.on('browser-window-focus', () => {
+    const now = Date.now();
+    if (now - lastFocusCheckAt < FOCUS_THROTTLE_MS) return;
+    lastFocusCheckAt = now;
+    void runLicenseWatchTick();
+  });
 };
 
 const ensureLicenseMetadata = async () => {
@@ -158,6 +314,10 @@ const ensureLicenseMetadata = async () => {
     );
     saveSecureStore(store);
   } catch (err) {
+    if (isLicenseRejectionError(err)) {
+      lockAppForLicense(err instanceof Error ? err.message : String(err));
+      throw err instanceof Error ? err : new Error(String(err));
+    }
     console.warn('[license] metadata refresh skipped:', err instanceof Error ? err.message : err);
   }
 
@@ -167,35 +327,14 @@ const ensureLicenseMetadata = async () => {
 const navigateMainWindowTo = async (url: string): Promise<void> => {
   if (!mainWindow) throw new Error('Application window is not ready');
 
-  await new Promise<void>((resolve, reject) => {
-    const wc = mainWindow!.webContents;
-    const timeout = setTimeout(() => {
-      cleanup();
-      reject(new Error('Timed out loading CRM in the main window'));
-    }, 60_000);
-
-    const onFail = (_event: Electron.Event, code: number, description: string) => {
-      cleanup();
-      reject(new Error(`Could not open CRM page (${code}): ${description}`));
-    };
-
-    const onFinish = () => {
-      const current = wc.getURL();
-      if (!current.includes('127.0.0.1')) return;
-      cleanup();
-      resolve();
-    };
-
-    const cleanup = () => {
-      clearTimeout(timeout);
-      wc.removeListener('did-fail-load', onFail);
-      wc.removeListener('did-finish-load', onFinish);
-    };
-
-    wc.once('did-fail-load', onFail);
-    wc.once('did-finish-load', onFinish);
-    void wc.loadURL(url);
-  });
+  // webContents.loadURL already rejects on did-fail-load. Do not require
+  // 127.0.0.1 here: Employee PCs intentionally load the Admin's LAN address.
+  await Promise.race([
+    mainWindow.loadURL(url),
+    new Promise<never>((_resolve, reject) => {
+      setTimeout(() => reject(new Error(`Timed out loading CRM page: ${url}`)), 60_000);
+    }),
+  ]);
 };
 
 /**
@@ -217,6 +356,8 @@ const launchCrm = async (store: ReturnType<typeof loadSecureStore>): Promise<str
 
   stopCrmServer();
 
+  const jwt = ensureDesktopJwtSecrets();
+
   await startCrmServer({
     DESKTOP_DATABASE_URL: databaseUrl,
     DESKTOP_LICENSE_TOKEN: refreshed.licenseToken || store.licenseToken || '',
@@ -227,8 +368,17 @@ const launchCrm = async (store: ReturnType<typeof loadSecureStore>): Promise<str
     DESKTOP_ADMIN_NAME: refreshed.adminName || store.adminName || '',
     DESKTOP_ADMIN_PASSWORD_HASH: refreshed.adminPasswordHash || store.adminPasswordHash || '',
     DESKTOP_ENABLED_FEATURES: (refreshed.enabledFeatures || store.enabledFeatures || []).join(','),
-    JWT_ACCESS_SECRET: process.env.JWT_ACCESS_SECRET || 'desktop-access-secret-min-32-chars!!',
-    JWT_REFRESH_SECRET: process.env.JWT_REFRESH_SECRET || 'desktop-refresh-secret-min-32-chars!',
+    // Cached subscription for fast /api/settings/account (no long cloud wait).
+    DESKTOP_PLAN_TYPE: refreshed.planType || store.planType || '',
+    DESKTOP_SUBSCRIPTION_END: refreshed.subscriptionEnd || store.subscriptionEnd || '',
+    DESKTOP_MAX_EMPLOYEES:
+      refreshed.maxEmployees != null
+        ? String(refreshed.maxEmployees)
+        : store.maxEmployees != null
+          ? String(store.maxEmployees)
+          : '',
+    JWT_ACCESS_SECRET: jwt.accessSecret,
+    JWT_REFRESH_SECRET: jwt.refreshSecret,
     MAIL_FROM_ADDRESS: 'noreply@example.com',
     SMTP_HOST: 'localhost',
     SMTP_USER: 'local',
@@ -237,6 +387,30 @@ const launchCrm = async (store: ReturnType<typeof loadSecureStore>): Promise<str
 
   const url = getCrmAppUrl(slug);
   await navigateMainWindowTo(url);
+
+  // Show Admin share address in tray so employees know what to type.
+  if (getInstallationMode().isServer()) {
+    try {
+      const os = await import('os');
+      let lanIp = '127.0.0.1';
+      for (const iface of Object.values(os.networkInterfaces())) {
+        for (const addr of iface || []) {
+          if (addr.family === 'IPv4' && !addr.internal) {
+            lanIp = addr.address;
+            break;
+          }
+        }
+        if (lanIp !== '127.0.0.1') break;
+      }
+      const port = getCrmPort();
+      trayService?.updateServerInfo({
+        status: 'Running (Admin / Wi‑Fi)',
+        ip: `${lanIp}:${port}`,
+      });
+      console.log(`[main] Admin share address: ${lanIp}:${port}`);
+    } catch { /* non-fatal */ }
+  }
+
   return url;
 };
 
@@ -254,26 +428,30 @@ const resolveBootstrapState = async (): Promise<'activation' | 'setup' | 'crm' |
     return 'activation';
   }
 
-  try {
-    const fp = await collectFingerprint();
-    const machineHash = store.machineHash || fp.machineHash;
-    if (!store.machineHash) {
-      saveSecureStore({ ...store, machineHash });
-    }
-    await heartbeatLicenseWithRetry(store.licenseToken!, machineHash, 2);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    const licenseRejected = /invalid|revoked|expired|unauthorized|forbidden|not found|403|401/i.test(message);
-    if (licenseRejected) {
-      console.warn('[license] stored license rejected — returning to activation:', message);
-      await resetLocalInstallation();
-      return 'activation';
-    }
-    console.warn('[license] heartbeat skipped (offline or cloud unreachable):', message);
+  // Always refresh from Super Admin first. Checking a stale local subscriptionEnd
+  // before heartbeat was locking renewed licenses until a manual hardware reset.
+  const { store: refreshed, cloudOk, rejection } = await refreshEntitlementFromCloud();
+
+  if (rejection) {
+    console.warn('[license] stored license rejected — locking app (data kept):', rejection.message);
+    stopCrmServer();
+    return 'locked';
   }
 
-  if (!store.setupComplete) return 'setup';
-  return 'crm';
+  if (isSubscriptionExpired(refreshed.subscriptionEnd)) {
+    stopCrmServer();
+    return 'locked';
+  }
+
+  // Offline: fail closed only when the last-known local end date has passed.
+  if (!cloudOk && isSubscriptionExpired(store.subscriptionEnd)) {
+    stopCrmServer();
+    return 'locked';
+  }
+
+  if (!refreshed.setupComplete && !store.setupComplete) return 'setup';
+  startLicenseWatch();
+  return store.setupComplete || refreshed.setupComplete ? 'crm' : 'setup';
 };
 
 // ── Phase 5: SERVER mode — connect to local Windows Service backend ───────────
@@ -322,26 +500,167 @@ async function _connectToLocalServer() {
 // ── Phase 5: CLIENT mode — full discovery pipeline ────────────────────────────
 /**
  * CLIENT mode: saved server → UDP discovery → manual entry.
- * Once connected, loads the CRM dashboard from the remote server.
+ * Once connected: auto-bind this PC under Admin license, then open login.
  */
+async function enrollEmployeeViaAdminServer(serverUrl: string): Promise<void> {
+  try {
+    const fp = await collectFingerprint();
+    const axios = (await import('axios')).default;
+    const res = await axios.post(
+      `${serverUrl.replace(/\/+$/, '')}/api/server/enroll-employee-device`,
+      {
+        machine_hash: fp.machineHash,
+        machine_name: fp.machineName,
+        machine_meta: fp.machineMeta,
+      },
+      { timeout: 20_000 }
+    );
+    const data = res.data?.data || {};
+    saveSecureStore({
+      ...loadSecureStore(),
+      machineHash: fp.machineHash,
+      companyName: data.company_name || loadSecureStore().companyName,
+      subdomain: data.subdomain || loadSecureStore().subdomain,
+    });
+    console.log('[main] Employee device auto-registered with Admin license');
+  } catch (err) {
+    // Do not block login — Admin may be offline from cloud; login still works.
+    const ax = err as { response?: { data?: { message?: string } }; message?: string };
+    console.warn(
+      '[main] Employee auto-register skipped:',
+      ax.response?.data?.message || ax.message || err
+    );
+  }
+}
+
+async function _openEmployeeLogin(result: {
+  serverUrl: string;
+  serverInfo: { tenantId?: string };
+  method: string;
+}) {
+  const tenantSlug = encodeURIComponent(
+    String(result.serverInfo.tenantId || 'local').replace(/^\/+|\/+$/g, '') || 'local'
+  );
+  const loginUrl = `${result.serverUrl}/${tenantSlug}/login`;
+  console.log(`[main] Server connected (${result.method}): opening ${loginUrl}`);
+  mainWindow?.webContents.send('app:state', 'employee-opening');
+  mainWindow?.webContents.send('server:discovery-status', {
+    message: 'Registering this PC with Admin…',
+    stage: 'connecting',
+  });
+  await enrollEmployeeViaAdminServer(result.serverUrl);
+  await navigateMainWindowTo(loginUrl);
+  mainWindow?.webContents.send('app:state', 'ready');
+}
+
 async function _discoverAndConnect() {
-  if (!serverConnectionService || !mainWindow) return;
+  if (!mainWindow) return;
+  if (!serverConnectionService) {
+    serverConnectionService = new ServerConnectionService(mainWindow, getInstallationMode());
+    serverConnectionService.on('status', ({ message, stage }: { message: string; stage: string }) => {
+      console.log(`[server-connection] ${stage}: ${message}`);
+      trayService?.updateServerInfo({ status: stage });
+    });
+  }
   try {
     const result = await serverConnectionService.discoverAndConnect();
-    console.log(`[main] Server connected (${result.method}): ${result.serverUrl}`);
-    mainWindow?.webContents.send('app:state', 'ready');
-    mainWindow?.loadURL(`${result.serverUrl}/local/login`);
+    await _openEmployeeLogin(result);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    // "Discovery cancelled" is expected when user clicks Connect mid-search
+    if (/cancelled/i.test(message)) return;
     console.error('[main] Server discovery failed:', message);
     mainWindow?.webContents.send('app:state', 'server-error');
     mainWindow?.webContents.send('app:error', { message });
   }
 }
 
+/**
+ * After the window loads (and after the user picks Admin/Employee),
+ * route into the correct bootstrap path.
+ *
+ * Cloud lookup (unless preferLocalChoice):
+ *   known ADMIN → Admin path | known EMPLOYEE → discovery | unknown → role-select
+ * preferLocalChoice=true after user just picked a role (do not wipe that choice).
+ */
+async function bootstrapAfterWindowReady(opts?: { preferLocalChoice?: boolean }) {
+  const preferLocal = opts?.preferLocalChoice === true;
+  const installMode = getInstallationMode();
+  mainWindow?.webContents.send('app:install-mode', installMode.getInfo());
+
+  if (!preferLocal) {
+    mainWindow?.webContents.send('app:state', 'loading');
+    try {
+      const fp = await collectFingerprint();
+      const lookup = await lookupDeviceByHash(fp.machineHash);
+      console.log('[bootstrap] device-lookup:', JSON.stringify(lookup));
+
+      if (lookup.known && lookup.admin_blocked) {
+        mainWindow?.webContents.send('app:state', 'locked');
+        return;
+      }
+
+      if (lookup.known && lookup.role === 'ADMIN') {
+        if (!installMode.hasChosenMode() || installMode.isClient()) {
+          installMode.setMode('SERVER');
+        }
+        mainWindow?.webContents.send('app:install-mode', installMode.getInfo());
+        const state = await resolveBootstrapState();
+        mainWindow?.webContents.send('app:state', state);
+        return;
+      }
+
+      if (lookup.known && lookup.role === 'EMPLOYEE') {
+        installMode.setMode('CLIENT');
+        mainWindow?.webContents.send('app:install-mode', installMode.getInfo());
+        mainWindow?.webContents.send('app:state', 'discovering');
+        await _discoverAndConnect();
+        return;
+      }
+
+      // Not in Super Admin DB — force role select (fixes leftover CLIENT AppData).
+      if (lookup.known === false) {
+        installMode.clearMode();
+        mainWindow?.webContents.send('app:install-mode', installMode.getInfo());
+        mainWindow?.webContents.send('app:state', 'role-select');
+        return;
+      }
+    } catch (err) {
+      console.warn(
+        '[bootstrap] device-lookup skipped (offline?):',
+        err instanceof Error ? err.message : err
+      );
+      // Offline / API not deployed: do not trust bare CLIENT leftovers from old installs.
+      const store = loadSecureStore();
+      if (installMode.isClient() && !store.companyName && !store.licenseToken) {
+        installMode.clearMode();
+        mainWindow?.webContents.send('app:install-mode', installMode.getInfo());
+        mainWindow?.webContents.send('app:state', 'role-select');
+        return;
+      }
+    }
+  }
+
+  if (!installMode.hasChosenMode()) {
+    mainWindow?.webContents.send('app:state', 'role-select');
+    return;
+  }
+
+  if (installMode.isClient()) {
+    mainWindow?.webContents.send('app:state', 'discovering');
+    await _discoverAndConnect();
+    return;
+  }
+
+  void resolveBootstrapState()
+    .then((state) => mainWindow?.webContents.send('app:state', state))
+    .catch(() => mainWindow?.webContents.send('app:state', 'activation'));
+}
+
 app.whenReady().then(() => {
   mainWindow = createWindow();
   initAutoUpdater(mainWindow);
+  attachLicenseWatchLifecycle();
 
   // ── Phase 5: Resolve installation mode ───────────────────────────────────
   const installMode = getInstallationMode();
@@ -383,33 +702,11 @@ app.whenReady().then(() => {
   // ── Phase 3/5: Windows Service Manager ────────────────────────────────────
   windowsServiceManager = new WindowsServiceManager();
 
-  // ── Phase 5: Server Connection Service (CLIENT + SERVER modes) ────────────
-  if (!installMode.isDesktop()) {
-    serverConnectionService = new ServerConnectionService(mainWindow, installMode);
-    serverConnectionService.on('status', ({ message, stage }: { message: string; stage: string }) => {
-      console.log(`[server-connection] ${stage}: ${message}`);
-      trayService?.updateServerInfo({ status: stage });
-    });
-  }
+  // ── Phase 5: Server Connection Service (created lazily for CLIENT) ────────
+  // Admin/DESKTOP use embedded CRM; CLIENT discovers Admin over Wi‑Fi.
 
   mainWindow.webContents.once('did-finish-load', () => {
-    // Inform renderer of the installation mode so it can adapt its UI
-    mainWindow?.webContents.send('app:install-mode', installMode.getInfo());
-
-    if (installMode.isDesktop()) {
-      // Legacy DESKTOP behaviour — resolve normal bootstrap state
-      void resolveBootstrapState()
-        .then((state) => mainWindow?.webContents.send('app:state', state))
-        .catch(() => mainWindow?.webContents.send('app:state', 'activation'));
-    } else if (installMode.isServer()) {
-      // SERVER mode — Electron connects to the local Windows Service backend
-      mainWindow?.webContents.send('app:state', 'server-connecting');
-      void _connectToLocalServer();
-    } else if (installMode.isClient()) {
-      // CLIENT mode — discover the remote server
-      mainWindow?.webContents.send('app:state', 'discovering');
-      void _discoverAndConnect();
-    }
+    void bootstrapAfterWindowReady();
   });
 
   app.on('activate', () => {
@@ -426,6 +723,19 @@ app.on('window-all-closed', () => {
   }
   trayService?.destroy();
   if (process.platform !== 'darwin') app.quit();
+});
+
+// User explicitly asked to quit (Cmd+Q, menu Quit, tray Exit, dock right-click Quit).
+// Mark the app as quitting so the window 'close' handler stops hiding to tray and
+// actually lets the app exit instead of forcing a force-quit.
+app.on('before-quit', () => {
+  (app as unknown as { isQuitting?: boolean }).isQuitting = true;
+  if (process.env.CRM_MODE !== 'server') {
+    stopCrmServer();
+  }
+  // Release locks on bundled postgres.exe so Windows uninstall can delete files.
+  void stopEmbeddedPostgres();
+  trayService?.destroy();
 });
 
 // ─── IPC handlers ───────────────────────────────────────────────────────────
@@ -481,8 +791,9 @@ ipcMain.handle('license:activate', async (_e, licenseKey: string) => {
     });
     return result;
   } catch (err: unknown) {
-    const ax = err as { response?: { data?: { message?: string } }; message?: string };
-    throw new Error(ax.response?.data?.message || ax.message || 'Activation failed');
+    const ax = err as { response?: { data?: { message?: string } }; message?: string; statusCode?: number };
+    const message = ax.response?.data?.message || ax.message || 'Activation failed';
+    throw new Error(message);
   }
 });
 
@@ -509,8 +820,13 @@ ipcMain.handle('setup:run', async () => {
     const steps: Array<{ id: string; label: string; run: (onProgress: (m: string) => void) => Promise<void> }> = [
       {
         id: 'postgres',
-        label: 'Installing PostgreSQL',
-        run: async (onProgress) => installPostgres(config, onProgress),
+        label: 'Setting up PostgreSQL',
+        // Use ensurePostgresRunning — uses bundled portable PG (no download server required).
+        run: async (onProgress) => {
+          const running = await ensurePostgresRunning(onProgress);
+          // Keep setup credentials in sync with the live config (port may change).
+          Object.assign(config, running);
+        },
       },
       {
         id: 'database',
@@ -533,6 +849,7 @@ ipcMain.handle('setup:run', async () => {
             setupComplete: true,
           });
           // Pass all credentials — backend bootstrap creates schema, admin & modules.
+          const jwt = ensureDesktopJwtSecrets();
           await startCrmServer({
             DESKTOP_DATABASE_URL: dbUrl,
             DESKTOP_LICENSE_TOKEN: activation.licenseToken || '',
@@ -543,8 +860,12 @@ ipcMain.handle('setup:run', async () => {
             DESKTOP_ADMIN_NAME: activation.adminName || '',
             DESKTOP_ADMIN_PASSWORD_HASH: activation.adminPasswordHash || '',
             DESKTOP_ENABLED_FEATURES: (activation.enabledFeatures || []).join(','),
-            JWT_ACCESS_SECRET: process.env.JWT_ACCESS_SECRET || 'desktop-access-secret-min-32-chars!!',
-            JWT_REFRESH_SECRET: process.env.JWT_REFRESH_SECRET || 'desktop-refresh-secret-min-32-chars!',
+            DESKTOP_PLAN_TYPE: activation.planType || '',
+            DESKTOP_SUBSCRIPTION_END: activation.subscriptionEnd || '',
+            DESKTOP_MAX_EMPLOYEES:
+              activation.maxEmployees != null ? String(activation.maxEmployees) : '',
+            JWT_ACCESS_SECRET: jwt.accessSecret,
+            JWT_REFRESH_SECRET: jwt.refreshSecret,
             MAIL_FROM_ADDRESS: 'noreply@example.com',
             SMTP_HOST: 'localhost',
             SMTP_USER: 'local',
@@ -578,11 +899,20 @@ ipcMain.handle('setup:run', async () => {
 });
 
 ipcMain.handle('crm:open', async () => {
-  const store = await ensureLicenseMetadata();
-  const url = await launchCrm(store);
-  void heartbeatLicenseWithRetry(store.licenseToken!, store.machineHash || '').catch((err) => {
-    console.warn('[license] heartbeat after open:', err.message);
-  });
+  // Refresh entitlement (and subscription_end) before any local expiry lock.
+  const { store, rejection } = await refreshEntitlementFromCloud();
+  if (rejection) {
+    lockAppForLicense(rejection.message);
+    throw rejection;
+  }
+  // Also pull admin metadata / token if needed.
+  const withMeta = await ensureLicenseMetadata();
+  if (isSubscriptionExpired(withMeta.subscriptionEnd || store.subscriptionEnd)) {
+    lockAppForLicense('subscription expired');
+    throw new Error('Subscription expired. Please renew to continue.');
+  }
+  const url = await launchCrm(withMeta);
+  startLicenseWatch();
   return { url };
 });
 
@@ -604,10 +934,17 @@ ipcMain.handle('license:transfer', async (_e, payload: { reason: string; new_dev
 ipcMain.handle('license:heartbeat', async () => {
   const store = loadSecureStore();
   if (!store.licenseToken) throw new Error('No license activated');
-  const data = await heartbeatLicenseWithRetry(store.licenseToken, store.machineHash || '');
-  const updated = cacheSubscriptionFromLicense(store, data as { plan?: string; plan_type?: string; user_limit?: number; subscription_end?: string });
-  saveSecureStore(updated);
-  return data;
+  try {
+    const data = await heartbeatLicenseWithRetry(store.licenseToken, store.machineHash || '');
+    const updated = cacheSubscriptionFromLicense(store, data as { plan?: string; plan_type?: string; user_limit?: number; subscription_end?: string });
+    saveSecureStore(updated);
+    return data;
+  } catch (err) {
+    if (isLicenseRejectionError(err)) {
+      lockAppForLicense(err instanceof Error ? err.message : String(err));
+    }
+    throw err;
+  }
 });
 
 ipcMain.handle('auth:save-login', (_e, email: string, password: string, expiresAt: number) => {
@@ -698,16 +1035,68 @@ ipcMain.handle('install-mode:set', (_e, mode: string) => {
   }
 });
 
+ipcMain.handle('install-mode:clear', () => {
+  getInstallationMode().clearMode();
+  return { success: true };
+});
+
+ipcMain.handle('install-mode:continue', async () => {
+  await bootstrapAfterWindowReady({ preferLocalChoice: true });
+  return { success: true };
+});
+
+ipcMain.handle('install-mode:reset-to-role-select', async () => {
+  getInstallationMode().clearMode();
+  reloadShellUI();
+  mainWindow?.webContents.send('app:state', 'role-select');
+  return { success: true };
+});
+
+ipcMain.handle('license:enroll-employee', async () => {
+  throw new Error(
+    'Employees do not enter a license key. Choose Employee PC and connect to the Admin PC — this device registers automatically.'
+  );
+});
+
+ipcMain.handle('server:retry-discovery', async () => {
+  mainWindow?.webContents.send('app:state', 'discovering');
+  await _discoverAndConnect();
+  return { success: true };
+});
+
+/**
+ * Direct Connect button path — does NOT depend on the discovery race.
+ * Probe with Node http, then navigate to Admin login.
+ */
+ipcMain.handle('server:connect-manual', async (_e, address: string) => {
+  try {
+    if (!mainWindow) return { success: false, message: 'Window not ready' };
+    if (!serverConnectionService) {
+      serverConnectionService = new ServerConnectionService(mainWindow, getInstallationMode());
+    }
+    const result = await serverConnectionService.connectManual(String(address || ''));
+    await _openEmployeeLogin(result);
+    return { success: true, url: `${result.serverUrl}/${result.serverInfo.tenantId}/login` };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    mainWindow?.webContents.send('app:error', { message });
+    return { success: false, message };
+  }
+});
+
 // ── Phase 5: Server connection IPC ───────────────────────────────────────────
 
 ipcMain.handle('server:connect', async (_e, serverUrl: string) => {
   if (!serverConnectionService) {
-    return { success: false, message: 'Server connection service not available in this install mode' };
+    serverConnectionService = new ServerConnectionService(mainWindow!, getInstallationMode());
   }
-  const info = await serverConnectionService.probeServer(serverUrl);
-  if (!info) return { success: false, message: 'Cannot reach server at ' + serverUrl };
-  serverConnectionService.getSavedServerUrl();
-  return { success: true, data: info };
+  try {
+    const result = await serverConnectionService.connectManual(String(serverUrl || ''));
+    await _openEmployeeLogin(result);
+    return { success: true, data: result.serverInfo };
+  } catch (err) {
+    return { success: false, message: err instanceof Error ? err.message : String(err) };
+  }
 });
 
 ipcMain.handle('server:get-saved', () => {
