@@ -1,0 +1,92 @@
+{
+  "$schema": "https://download.insuredhub.com/manifest-schema.json",
+  "version": "1.0.0",
+  "updatedAt": "2026-08-08T00:00:00Z",
+  "baseUrl": "https://download.insuredhub.com",
+  "dependencies": [
+    {
+      "id": "postgresql",
+      "name": "PostgreSQL",
+      "currentVersion": "managed-by-super-admin",
+      "minimumVersion": "18.4",
+      "maximumVersion": "18.99",
+      "platforms": {
+        "win32-x64": {
+          "url": "managed-by-super-admin",
+          "filename": "managed-by-super-admin",
+          "checksum": "sha256:managed-by-super-admin",
+          "size": 0,
+          "installerType": "zip",
+          "verifyCommand": "pg_ctl --version",
+          "detectPaths": [
+            "C:\\Program Files\\PostgreSQL\\18\\bin\\pg_ctl.exe"
+          ],
+          "serviceName": "postgresql-x64-18"
+        },
+        "win32-arm64": {
+          "url": "managed-by-super-admin",
+          "filename": "managed-by-super-admin",
+          "checksum": "sha256:managed-by-super-admin",
+          "size": 0,
+          "installerType": "zip",
+          "detectPaths": [
+            "C:\\Program Files\\PostgreSQL\\18\\bin\\pg_ctl.exe"
+          ],
+          "serviceName": "postgresql-x64-18"
+        },
+        "darwin-arm64": {
+          "url": "managed-by-super-admin",
+          "filename": "managed-by-super-admin",
+          "checksum": "sha256:managed-by-super-admin",
+          "size": 0,
+          "installerType": "zip",
+          "detectPaths": [
+            "/Library/PostgreSQL/18/bin/pg_ctl"
+          ]
+        },
+        "darwin-x64": {
+          "url": "",
+          "filename": "",
+          "checksum": "",
+          "size": 0,
+          "installerType": "zip",
+          "detectPaths": [
+            "/Library/PostgreSQL/18/bin/pg_ctl"
+          ]
+        }
+      }
+    },
+    {
+      "id": "ocr-runtime",
+      "name": "OCR Runtime",
+      "currentVersion": "5.3.4",
+      "platforms": {
+        "win32-x64": {
+          "url": "/ocr/windows/tesseract-5.3.4-win64.exe",
+          "filename": "tesseract-5.3.4-win64.exe",
+          "checksum": "sha256:PLACEHOLDER_OCR_WIN_CHECKSUM",
+          "size": 45000000,
+          "installerType": "exe",
+          "silentArgs": ["/S"],
+          "detectPaths": ["C:\\Program Files\\Tesseract-OCR\\tesseract.exe"]
+        },
+        "darwin-arm64": {
+          "url": "/ocr/macos/tesseract-5.3.4-macos-arm64.pkg",
+          "filename": "tesseract-5.3.4-macos-arm64.pkg",
+          "checksum": "sha256:PLACEHOLDER_OCR_MAC_ARM64_CHECKSUM",
+          "size": 42000000,
+          "installerType": "pkg",
+          "detectPaths": ["/opt/homebrew/bin/tesseract", "/usr/local/bin/tesseract"]
+        },
+        "darwin-x64": {
+          "url": "/ocr/macos/tesseract-5.3.4-macos-intel.pkg",
+          "filename": "tesseract-5.3.4-macos-intel.pkg",
+          "checksum": "sha256:PLACEHOLDER_OCR_MAC_X64_CHECKSUM",
+          "size": 44000000,
+          "installerType": "pkg",
+          "detectPaths": ["/usr/local/bin/tesseract"]
+        }
+      }
+    }
+  ]
+}

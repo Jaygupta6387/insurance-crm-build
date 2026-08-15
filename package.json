@@ -1,6 +1,6 @@
 {
   "name": "insurecrm-desktop",
-  "version": "1.4.1",
+  "version": "1.4.63",
   "description": "InsureCRM Desktop — local PostgreSQL + cloud license",
   "main": "out/main/index.js",
   "author": "InsureCRM",
@@ -18,11 +18,9 @@
     "dist:publish": "npm run sync:crm && npm run build && electron-builder --publish always --config electron-builder.yml",
     "dist:publish:mac": "npm run sync:crm && npm run build && electron-builder --mac --publish always --config electron-builder.yml",
     "dist:publish:win": "npm run sync:crm && npm run build && electron-builder --win --publish always --config electron-builder.yml",
-    "bundle:postgresql": "node scripts/bundle-postgresql.mjs",
-    "bundle:postgresql:win": "node scripts/bundle-postgresql.mjs --platform win",
-    "bundle:postgresql:mac": "node scripts/bundle-postgresql.mjs --platform mac",
-    "predist:win": "node scripts/bundle-postgresql.mjs --platform win",
-    "predist:mac": "node scripts/bundle-postgresql.mjs --platform mac"
+    "release:mac": "npm run sync:crm && npm run build && electron-builder --mac --arm64 --x64 --config electron-builder.yml",
+    "release:win": "npm run sync:crm && npm run build && electron-builder --win --x64 --config electron-builder.yml",
+    "release:all": "echo 'Use GitHub Actions release.yml for Mac+Windows together (push a v* tag)'"
   },
   "dependencies": {
     "axios": "^1.7.9",

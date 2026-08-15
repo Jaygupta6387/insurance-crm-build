@@ -167,18 +167,16 @@ if (-not $SkipPostgres) {
         Log "PostgreSQL already installed: $pgVersion"
         OK "PostgreSQL: $pgVersion"
     } else {
-        Log "Downloading PostgreSQL 16..."
-        $pgInstaller = "$env:TEMP\postgresql-installer.exe"
-        Invoke-WebRequest "https://get.enterprisedb.com/postgresql/postgresql-16.4-1-windows-x64.exe" -OutFile $pgInstaller
-        $pgDataDir = Join-Path $DataRoot "PostgreSQL\data"
-        New-Item -ItemType Directory -Force -Path $pgDataDir | Out-Null
-        Start-Process $pgInstaller -Wait -ArgumentList "--unattendedmodeui none --mode unattended --superpassword `"$DbPassword`" --servicename postgresql-16 --datadir `"$pgDataDir`""
-        Remove-Item $pgInstaller -Force -ErrorAction SilentlyContinue
-        # Refresh PATH
-        $pgBin = "C:\Program Files\PostgreSQL\16\bin"
-        $env:PATH += ";$pgBin"
-        [System.Environment]::SetEnvironmentVariable("PATH", $env:PATH + ";$pgBin", "Machine")
-        OK "PostgreSQL 16 installed"
+        Log "Fetching PostgreSQL dependency metadata from Super Admin API..."
+        $apiBase = if ($env:LICENSE_CLOUD_API_URL) { $env:LICENSE_CLOUD_API_URL.TrimEnd('/') } else { "https://super-admin-panel-crm-backend.onrender.com/api" }
+        $metaUrl = "$apiBase/dependencies/postgresql?platform=windows&architecture=x64&channel=stable"
+        $meta = Invoke-RestMethod -Uri $metaUrl -Method Get
+        $dep = $meta.data.dependency
+        if (-not $dep -or -not $dep.downloadUrl) { throw "Super Admin dependency API did not return a PostgreSQL download URL." }
+        $pgZip = Join-Path $env:TEMP $dep.fileName
+        Log "Downloading $($dep.fileName) from GitHub..."
+        Invoke-WebRequest $dep.downloadUrl -OutFile $pgZip
+        throw "PostgreSQL $($dep.version) ZIP saved to $pgZip. Complete extract/configure via InsureCRM Desktop Admin setup."
     }
 } else {
     Log "Skipping PostgreSQL installation (--SkipPostgres)"

@@ -7,9 +7,25 @@ const CLOUD_API =
 
 const api = axios.create({ timeout: 30_000 });
 
-const cloudError = (err: unknown, fallback: string): Error => {
+const cloudError = (err: unknown, fallback: string): Error & { statusCode?: number } => {
   const ax = err as AxiosError<{ message?: string }>;
-  return new Error(ax.response?.data?.message || ax.message || fallback);
+  let message = ax.response?.data?.message || ax.message || fallback;
+  const status = ax.response?.status;
+
+  // Normalize older Super Admin wording + map by status for the activation UI.
+  if (
+    status === 409 ||
+    /already activated on another device|already used on another/i.test(message)
+  ) {
+    message =
+      'This license is already used on another system. Contact your administrator to reset hardware.';
+  } else if (status === 404 && /invalid license/i.test(message)) {
+    message = 'Invalid license key';
+  }
+
+  const error = new Error(message) as Error & { statusCode?: number };
+  if (status) error.statusCode = status;
+  return error;
 };
 
 export interface ActivationResult {
@@ -35,6 +51,8 @@ export const activateLicense = async (
     const res = await api.post(`${CLOUD_API}/licenses/activate`, {
       license_key: licenseKey,
       machine_hash: fingerprint.machineHash,
+      // Lets Super Admin recognize installs bound before the stable fingerprint change.
+      legacy_machine_hash: fingerprint.legacyMachineHash,
       machine_name: fingerprint.machineName,
       machine_meta: fingerprint.machineMeta,
     });
@@ -96,5 +114,46 @@ export const getLicenseStatus = async (licenseToken: string) => {
     return res.data.data;
   } catch (err) {
     throw cloudError(err, 'Could not fetch license status');
+  }
+};
+
+export type DeviceLookupResult = {
+  known: boolean;
+  role?: 'ADMIN' | 'EMPLOYEE';
+  license_id?: string;
+  company_name?: string;
+  subdomain?: string;
+  license_status?: string;
+  admin_blocked?: boolean;
+  machine_name?: string;
+};
+
+export const lookupDeviceByHash = async (machineHash: string): Promise<DeviceLookupResult> => {
+  try {
+    const res = await api.get(`${CLOUD_API}/licenses/device-lookup`, {
+      params: { machine_hash: machineHash },
+      timeout: 12_000,
+    });
+    return (res.data?.data || res.data) as DeviceLookupResult;
+  } catch (err) {
+    throw cloudError(err, 'Device lookup failed');
+  }
+};
+
+export const enrollEmployeeDevice = async (
+  licenseKey: string,
+  fingerprint: MachineFingerprint
+): Promise<{ role: string; company_name: string; subdomain: string; license_id: string }> => {
+  try {
+    const res = await api.post(`${CLOUD_API}/licenses/enroll-employee`, {
+      license_key: licenseKey,
+      machine_hash: fingerprint.machineHash,
+      legacy_machine_hash: fingerprint.legacyMachineHash,
+      machine_name: fingerprint.machineName,
+      machine_meta: fingerprint.machineMeta,
+    });
+    return res.data.data;
+  } catch (err) {
+    throw cloudError(err, 'Employee enrollment failed');
   }
 };

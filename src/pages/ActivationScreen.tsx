@@ -49,7 +49,8 @@ export default function ActivationScreen({ onActivated }: Props) {
           {loading ? 'Activating…' : 'Activate License'}
         </button>
         <p style={{ color: '#64748b', fontSize: 13, marginTop: 16, textAlign: 'center' }}>
-          Switching company? Enter the new license key above — the app removes the previous local database automatically.
+          Same PC after a database reset: re-enter this license key to restore access.
+          If the key is already active on a different computer, contact your administrator.
         </p>
       </div>
     </div>

@@ -64,16 +64,6 @@ jobs:
       - name: Build Electron shell
         run: npm run build
 
-      - name: Bundle PostgreSQL (Windows)
-        if: matrix.platform == 'win'
-        run: node scripts/bundle-postgresql.mjs --platform win
-
-      - name: Bundle PostgreSQL (macOS)
-        if: matrix.platform == 'mac'
-        run: |
-          brew install postgresql@16
-          node scripts/bundle-postgresql.mjs --platform mac
-
       - name: Verify CRM bundle before packaging
         run: node scripts/verify-crm-bundle.mjs
 
@@ -82,10 +72,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: false
-        run: npx electron-builder --mac --${{ matrix.arch }} --publish always --config electron-builder.yml
+        run: npx electron-builder --mac --arm64 --x64 --publish always --config electron-builder.yml
 
       - name: Publish Windows release
         if: matrix.platform == 'win'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx electron-builder --win --publish always --config electron-builder.yml
+        run: npx electron-builder --win --x64 --publish always --config electron-builder.yml

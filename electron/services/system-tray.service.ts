@@ -90,11 +90,24 @@ export class SystemTrayService {
 
   /**
    * Call this from mainWindow's 'close' event.
-   * Prevents the window from closing — hides to tray instead.
    *
-   *   mainWindow.on('close', (e) => tray.handleWindowClose(e));
+   * Windows: always quit (stop CRM/Postgres). Hiding to tray makes NSIS install/
+   * uninstall show "cannot be closed — close it manually".
+   * macOS / SERVER-style: hide to tray unless the app is already quitting.
    */
   handleWindowClose(event: Electron.Event) {
+    if ((app as unknown as { isQuitting?: boolean }).isQuitting) {
+      return;
+    }
+
+    // Windows installers cannot close a tray-hidden Electron process cleanly.
+    if (process.platform === 'win32') {
+      (app as unknown as { isQuitting?: boolean }).isQuitting = true;
+      event.preventDefault();
+      app.quit();
+      return;
+    }
+
     event.preventDefault();
     this.mainWindow.hide();
     this.tray?.displayBalloon?.({
@@ -184,8 +197,9 @@ export class SystemTrayService {
           'Exit InsuredHub Server?',
           'All connected users will be disconnected. The Windows Service (if installed) will restart the backend automatically.',
           () => {
+            (app as unknown as { isQuitting?: boolean }).isQuitting = true;
             this.destroy();
-            app.exit(0);
+            app.quit();
           }
         ),
       },

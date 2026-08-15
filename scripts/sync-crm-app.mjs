@@ -14,8 +14,8 @@
  *
  * Override source path (CI): CRM_APP_PATH=/path/to/crm-app node scripts/sync-crm-app.mjs
  */
-import { cpSync, existsSync, mkdirSync, rmSync, statSync } from 'fs';
-import { join, dirname } from 'path';
+import { cpSync, existsSync, mkdirSync, rmSync, statSync, readdirSync, copyFileSync } from 'fs';
+import { join, dirname, relative } from 'path';
 import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
 
@@ -40,7 +40,21 @@ if (!existsSync(join(crmBackend, 'package.json'))) {
 console.log('Syncing CRM app from:', crmApp);
 
 // ── Clean slate ────────────────────────────────────────────────────────────
-if (existsSync(bundle)) rmSync(bundle, { recursive: true, force: true });
+if (existsSync(bundle)) {
+  // macOS can briefly leave ENOTEMPTY after Finder/antivirus touches the tree.
+  let lastErr;
+  for (let i = 0; i < 5; i++) {
+    try {
+      rmSync(bundle, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+      lastErr = null;
+      break;
+    } catch (err) {
+      lastErr = err;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+    }
+  }
+  if (lastErr) throw lastErr;
+}
 mkdirSync(bundleBackend, { recursive: true });
 mkdirSync(dirname(bundleFrontendDist), { recursive: true });
 
@@ -122,9 +136,48 @@ run(
 const bundleSize = (statSync(outFile).size / 1024).toFixed(1);
 console.log(`  ✓ crm-bootstrap.cjs (${bundleSize} KB)`);
 
-// ── Remove src/ — source must not ship in the installer ───────────────────
+// Prisma Client is inlined into crm-bootstrap.cjs, but the native query engines
+// must remain at the generate-time paths (src/generated/*/libquery_engine-*).
+// Keep only those binaries (+ schema.prisma); delete the rest of src/.
+console.log('→ Preserving Prisma query engines…');
+const prismaClients = ['company-client', 'superadmin-client'];
+const preserved = [];
+for (const client of prismaClients) {
+  const genDir = join(bundleBackend, 'src', 'generated', client);
+  if (!existsSync(genDir)) continue;
+  for (const name of readdirSync(genDir)) {
+    const isEngine = name.includes('query_engine') || name.endsWith('.node');
+    const isSchema = name === 'schema.prisma';
+    if (!isEngine && !isSchema) continue;
+    preserved.push({
+      from: join(genDir, name),
+      to: join(bundleBackend, 'src', 'generated', client, name),
+    });
+  }
+}
+
+const staging = join(bundleBackend, '.prisma-engine-staging');
+rmSync(staging, { recursive: true, force: true });
+for (const file of preserved) {
+  const dest = join(staging, relative(bundleBackend, file.to));
+  mkdirSync(dirname(dest), { recursive: true });
+  copyFileSync(file.from, dest);
+}
+
 rmSync(join(bundleBackend, 'src'), { recursive: true, force: true });
-console.log('  ✓ src/ removed — no raw source in bundle');
+
+for (const file of preserved) {
+  const staged = join(staging, relative(bundleBackend, file.to));
+  mkdirSync(dirname(file.to), { recursive: true });
+  copyFileSync(staged, file.to);
+  console.log(`  ✓ ${relative(bundleBackend, file.to)}`);
+}
+rmSync(staging, { recursive: true, force: true });
+
+if (!preserved.length) {
+  throw new Error('No Prisma query engines found after generate — cannot package desktop backend');
+}
+console.log(`  ✓ kept ${preserved.length} Prisma engine/schema file(s); source JS removed`);
 
 // ── Build frontend ─────────────────────────────────────────────────────────
 if (!existsSync(join(crmFrontend, 'package.json'))) {

@@ -1,25 +1,26 @@
 # InsureCRM Desktop Resources
 
-## PostgreSQL (required for Windows/macOS production builds)
+## PostgreSQL (downloaded at Admin setup)
 
-The setup wizard runs a **local** PostgreSQL instance on port `54329`. The installer must include PostgreSQL tools, or the user must have PostgreSQL installed.
+PostgreSQL is **not** shipped inside the Electron installer.
 
-### Option A — Bundle portable binaries (required for macOS client builds)
+On first Admin setup:
 
-Before `npm run dist:mac` / `npm run dist:win`, run:
+1. Desktop calls Super Admin `GET /api/dependencies/postgresql`
+2. Receives version + HTTPS GitHub URL + SHA-256
+3. Downloads the ZIP **directly from GitHub**
+4. Verifies SHA-256, extracts into `userData/postgresql-runtime/`
+
+Configure only:
 
 ```bash
-npm run bundle:postgresql:mac   # or bundle:postgresql:win
+LICENSE_CLOUD_API_URL=https://your-super-admin-host/api
 ```
 
-This downloads official PostgreSQL 16 portable binaries and relinks macOS libraries so clients do **not** need Homebrew PostgreSQL installed.
+## Files
 
-- `postgresql-win/bin/` — `pg_ctl.exe`, `initdb.exe`, `psql.exe`, and dependent DLLs
-- `postgresql-mac/bin/` — `pg_ctl`, `initdb`, `psql`, etc. (self-contained, no `/opt/homebrew` paths)
-
-### Option B — System PostgreSQL (development / IT-managed PCs)
-
-- **Windows:** Install PostgreSQL 16 from https://www.postgresql.org/download/windows/ (default path `C:\Program Files\PostgreSQL\16\`). Restart the app and run setup again.
-- **macOS:** `brew install postgresql@16`
-
-The app detects standard install paths and creates its own data directory under `%AppData%\insurecrm-desktop\postgresql\pgdata`.
+| File | Purpose |
+|------|---------|
+| `dependency-manifest.json` | Local fallback metadata (OCR + PG detectPaths) |
+| `service-daemon.js` | Windows Service entry (SERVER mode) |
+| `service-daemon-config.json` | Service config template |

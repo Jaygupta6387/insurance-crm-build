@@ -11,10 +11,16 @@ files:
   - package.json
 
 extraResources:
+  # Shared assets — PostgreSQL is downloaded at Admin setup (not shipped in the installer)
   - from: resources/
     to: resources/
     filter:
       - "**/*"
+      - "!installer-hooks.nsh"
+      - "!**/*.nsh"
+      - "!postgresql-win/**"
+      - "!postgresql-mac/**"
+      - "!force-uninstall-windows.bat"
   - from: .crm-bundle/backend
     to: crm-backend
     filter:
@@ -22,10 +28,11 @@ extraResources:
       - "package.json"
       - "node_modules/**"
       - "prisma/**"
+      # Prisma query engines only (JS source is bundled into crm-bootstrap.cjs)
+      - "src/generated/**"
       - "!logs/**"
       - "!**/.env"
       - "!**/.env.*"
-      - "!src/**"
       - "!scripts/**"
       - "!nodemon.json"
   - from: .crm-bundle/frontend/dist
@@ -38,6 +45,8 @@ publish:
   releaseType: release
 
 win:
+  # No spaces in the .exe name — spaces break NSIS uninstall paths on Windows
+  executableName: InsureCRM-Desktop
   target:
     - target: nsis
       arch:
@@ -50,6 +59,7 @@ mac:
     - target: dmg
       arch:
         - arm64
+        - x64
   artifactName: InsureCRM-Desktop-${version}-${arch}.${ext}
   category: public.app-category.business
   hardenedRuntime: false
@@ -57,9 +67,27 @@ mac:
 
 nsis:
   oneClick: false
+  perMachine: false
+  allowElevation: true
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
-  perMachine: false
+  createStartMenuShortcut: true
+  # Shortcut/display names without relying on spaced executable paths
+  shortcutName: InsureCRM Desktop
+  uninstallDisplayName: InsureCRM Desktop
+  unicode: true
+  # Avoid broken differential/uninstaller metadata from cross-compiling on macOS
+  differentialPackage: false
+  deleteAppDataOnUninstall: false
+  # Always regenerate a fresh uninstaller instead of reusing a stale one
+  packElevateHelper: true
+  runAfterFinish: true
+  menuCategory: false
+  # Force-stop tray/Postgres; override CHECK_APP_RUNNING (see installer-hooks.nsh)
+  # Keep build/installer.nsh in sync (electron-builder default include name).
+  include: installer-hooks.nsh
+  warningsAsErrors: false
+  guid: com.insurecrm.desktop
 
 dmg:
   sign: false

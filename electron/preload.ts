@@ -50,6 +50,27 @@ export interface DesktopApi {
   // ── Phase 3: Socket events from server ─────────────────────────────────────
   onSocketConnected: (cb: (data: { serverUrl: string }) => void) => () => void;
   onSocketDisconnected: (cb: (data: { reason: string }) => void) => () => void;
+
+  // ── Phase 5: Installation Mode / Wi‑Fi discovery ────────────────────────────
+  getInstallMode: () => Promise<{
+    mode: string | null;
+    chosen: boolean;
+    isServer: boolean;
+    isClient: boolean;
+    isDesktop: boolean;
+    source: string;
+  }>;
+  setInstallMode: (mode: string) => Promise<{ success: boolean; mode?: string; message?: string }>;
+  clearInstallMode: () => Promise<{ success: boolean }>;
+  continueAfterRoleSelect: () => Promise<{ success: boolean }>;
+  resetToRoleSelect: () => Promise<{ success: boolean }>;
+  enrollEmployee: (licenseKey: string) => Promise<unknown>;
+  retryServerDiscovery: () => Promise<{ success: boolean }>;
+  onServerDiscoveryStatus: (cb: (data: { message: string; stage: string }) => void) => () => void;
+  onInstallMode: (cb: (info: Record<string, unknown>) => void) => () => void;
+  respondManualAddress: (address: string) => void;
+  connectManual: (address: string) => Promise<{ success: boolean; message?: string; url?: string }>;
+  onAppError: (cb: (data: { message: string }) => void) => () => void;
 }
 
 const api: DesktopApi = {
@@ -116,6 +137,11 @@ const api: DesktopApi = {
   // ── Phase 5: Installation Mode ──────────────────────────────────────────────
   getInstallMode: () => ipcRenderer.invoke('install-mode:get'),
   setInstallMode: (mode: string) => ipcRenderer.invoke('install-mode:set', mode),
+  clearInstallMode: () => ipcRenderer.invoke('install-mode:clear'),
+  continueAfterRoleSelect: () => ipcRenderer.invoke('install-mode:continue'),
+  resetToRoleSelect: () => ipcRenderer.invoke('install-mode:reset-to-role-select'),
+  enrollEmployee: (licenseKey: string) => ipcRenderer.invoke('license:enroll-employee', licenseKey),
+  retryServerDiscovery: () => ipcRenderer.invoke('server:retry-discovery'),
 
   // ── Phase 5: Server connection status ──────────────────────────────────────
   onServerDiscoveryStatus: (cb) => {
@@ -129,8 +155,9 @@ const api: DesktopApi = {
     return () => ipcRenderer.removeListener('app:install-mode', handler);
   },
 
-  // Phase 5: Manual server address response (used in CLIENT discovery flow)
+  // Phase 5: Manual server address — fire-and-forget (race) + invoke (reliable)
   respondManualAddress: (address: string) => ipcRenderer.send('server:manual-address-response', address),
+  connectManual: (address: string) => ipcRenderer.invoke('server:connect-manual', address),
 
   // Phase 5: Error channel
   onAppError: (cb) => {
