@@ -1,5 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, shell, powerMonitor } from 'electron';
 import { join } from 'path';
+import { machineIdSync } from 'node-machine-id';
 import {
   loadSecureStore,
   saveSecureStore,
@@ -11,7 +12,13 @@ import {
   ensureDesktopJwtSecrets,
 } from './services/secure-store.service';
 import { collectFingerprint } from './services/fingerprint.service';
-import { activateLicense, heartbeatLicenseWithRetry, requestTransfer, lookupDeviceByHash } from './services/license.service';
+import {
+  activateLicense,
+  heartbeatLicenseWithRetry,
+  requestTransfer,
+  lookupDeviceByHash,
+  isLicenseNotFoundError,
+} from './services/license.service';
 import {
   getDefaultPostgresConfig,
   resetPostgresData,
@@ -127,12 +134,30 @@ const cacheSubscriptionFromLicense = (
     subscription_end?: string | null;
     features?: Record<string, string>;
     enabled_features?: string[];
+    mail?: {
+      smtp_email?: string;
+      smtp_password?: string;
+      from_name?: string;
+      smtp_host?: string;
+      smtp_port?: number;
+      smtp_secure?: boolean;
+      allow_policy_customer_email?: boolean;
+      policy_customer_email_subject?: string | null;
+      policy_customer_email_html?: string | null;
+      provisioned_by?: string;
+    } | null;
   }
 ) => {
   const plan = data.plan || data.plan_type;
   const hasFeatures = data.features || data.enabled_features;
   const hasSubscriptionEnd = Object.prototype.hasOwnProperty.call(data, 'subscription_end');
-  if (!plan && !hasSubscriptionEnd && data.user_limit == null && !hasFeatures) return store;
+  const mailJson =
+    data.mail && data.mail.smtp_email && data.mail.smtp_password
+      ? JSON.stringify(data.mail)
+      : undefined;
+  if (!plan && !hasSubscriptionEnd && data.user_limit == null && !hasFeatures && !mailJson) {
+    return store;
+  }
   return {
     ...store,
     planType: plan || store.planType,
@@ -143,6 +168,7 @@ const cacheSubscriptionFromLicense = (
     maxEmployees: data.user_limit ?? store.maxEmployees,
     ...(data.enabled_features ? { enabledFeatures: data.enabled_features } : {}),
     ...(data.features ? { featureMap: data.features } : {}),
+    ...(mailJson ? { mailJson } : {}),
   };
 };
 
@@ -158,7 +184,8 @@ const isLicenseRejectionError = (err: unknown): boolean => {
     err && typeof err === 'object' && 'statusCode' in err
       ? Number((err as { statusCode?: number }).statusCode)
       : undefined;
-  if (statusCode === 401 || statusCode === 403) return true;
+  if (statusCode === 401 || statusCode === 403 || statusCode === 404) return true;
+  if (isLicenseNotFoundError(err)) return true;
 
   const message = err instanceof Error ? err.message : String(err);
   const networkish = /timeout|ECONN|ENOTFOUND|ENETUNREACH|network|cannot reach|aborted/i.test(
@@ -174,12 +201,37 @@ const isLicenseRejectionError = (err: unknown): boolean => {
 const lockAppForLicense = (reason: string): void => {
   console.warn('[license] locking app:', reason);
   stopCrmServer();
-  mainWindow?.webContents.send('app:state', 'locked');
+  const licenseGone =
+    isLicenseNotFoundError(new Error(reason)) || /license not found/i.test(reason);
+  if (licenseGone) {
+    clearSecureStore();
+    getInstallationMode().clearMode();
+  }
+  const meta = { reason, licenseGone };
+  mainWindow?.webContents.send('app:state', 'locked', meta);
   // Reload shell UI so LockScreen is visible even if CRM URL was loaded in the window.
   if (mainWindow && !mainWindow.webContents.getURL().includes('index.html') && !process.env.ELECTRON_RENDERER_URL) {
     reloadShellUI();
   } else if (mainWindow?.webContents.getURL().includes('localhost') || mainWindow?.webContents.getURL().includes('127.0.0.1')) {
     reloadShellUI();
+  }
+  // After reload, re-send lock so LockScreen still gets the reason.
+  if (licenseGone || mainWindow) {
+    setTimeout(() => {
+      mainWindow?.webContents.send('app:state', 'locked', meta);
+    }, 800);
+  }
+};
+
+/** Wipe local license + role so user can pick Admin PC / Employee PC again. */
+const resetToRoleSelectFresh = async (): Promise<void> => {
+  stopCrmServer();
+  clearSecureStore();
+  getInstallationMode().clearMode();
+  if (mainWindow) {
+    reloadShellUI();
+    mainWindow.webContents.send('app:install-mode', getInstallationMode().getInfo());
+    mainWindow.webContents.send('app:state', 'role-select');
   }
 };
 
@@ -216,6 +268,18 @@ const refreshEntitlementFromCloud = async (): Promise<{
         subscription_end?: string | null;
         features?: Record<string, string>;
         enabled_features?: string[];
+        mail?: {
+          smtp_email?: string;
+          smtp_password?: string;
+          from_name?: string;
+          smtp_host?: string;
+          smtp_port?: number;
+          smtp_secure?: boolean;
+          allow_policy_customer_email?: boolean;
+          policy_customer_email_subject?: string | null;
+          policy_customer_email_html?: string | null;
+          provisioned_by?: string;
+        } | null;
       }
     );
     saveSecureStore(refreshed);
@@ -377,6 +441,7 @@ const launchCrm = async (store: ReturnType<typeof loadSecureStore>): Promise<str
         : store.maxEmployees != null
           ? String(store.maxEmployees)
           : '',
+    DESKTOP_MAIL_JSON: refreshed.mailJson || store.mailJson || '',
     JWT_ACCESS_SECRET: jwt.accessSecret,
     JWT_REFRESH_SECRET: jwt.refreshSecret,
     MAIL_FROM_ADDRESS: 'noreply@example.com',
@@ -470,10 +535,15 @@ async function _connectToLocalServer() {
     try {
       const res = await fetch(`${LOCAL_URL}/api/server/info`, { signal: AbortSignal.timeout(2_000) });
       if (res.ok) {
-        const body = await res.json() as { success: boolean; data?: { app: string } };
+        const body = await res.json() as { success: boolean; data?: { app: string; tenantId?: string } };
         if (body.success && body.data?.app === 'InsuredHub') {
           mainWindow?.webContents.send('app:state', 'ready');
-          mainWindow?.loadURL(`${LOCAL_URL}/local/login`);
+          const slug =
+            loadSecureStore().subdomain ||
+            body.data.tenantId ||
+            'local';
+          const safe = encodeURIComponent(String(slug).replace(/^\/+|\/+$/g, '') || 'local');
+          mainWindow?.loadURL(`${LOCAL_URL}/${safe}/login`);
           console.log('[main] Connected to local server:', LOCAL_URL);
           return;
         }
@@ -538,17 +608,21 @@ async function _openEmployeeLogin(result: {
   serverInfo: { tenantId?: string };
   method: string;
 }) {
-  const tenantSlug = encodeURIComponent(
-    String(result.serverInfo.tenantId || 'local').replace(/^\/+|\/+$/g, '') || 'local'
-  );
-  const loginUrl = `${result.serverUrl}/${tenantSlug}/login`;
-  console.log(`[main] Server connected (${result.method}): opening ${loginUrl}`);
   mainWindow?.webContents.send('app:state', 'employee-opening');
   mainWindow?.webContents.send('server:discovery-status', {
     message: 'Registering this PC with Admin…',
     stage: 'connecting',
   });
   await enrollEmployeeViaAdminServer(result.serverUrl);
+  // Prefer slug returned by Admin enroll / local store over discovery guess.
+  const store = loadSecureStore();
+  const rawSlug =
+    store.subdomain ||
+    result.serverInfo.tenantId ||
+    'local';
+  const tenantSlug = String(rawSlug).replace(/^\/+|\/+$/g, '') || 'local';
+  const loginUrl = `${result.serverUrl.replace(/\/+$/, '')}/${encodeURIComponent(tenantSlug)}/login`;
+  console.log(`[main] Server connected (${result.method}): opening ${loginUrl}`);
   await navigateMainWindowTo(loginUrl);
   mainWindow?.webContents.send('app:state', 'ready');
 }
@@ -787,6 +861,10 @@ ipcMain.handle('license:activate', async (_e, licenseKey: string) => {
       maxEmployees: result.user_limit,
       enabledFeatures: result.enabled_features || [],
       featureMap: result.features || {},
+      mailJson:
+        result.mail && result.mail.smtp_email && result.mail.smtp_password
+          ? JSON.stringify(result.mail)
+          : undefined,
       setupComplete: false,
     });
     return result;
@@ -927,6 +1005,16 @@ ipcMain.handle('license:transfer', async (_e, payload: { reason: string; new_dev
       new_machine_hash: fp.machineHash,
     });
   } catch (err) {
+    if (isLicenseNotFoundError(err)) {
+      // Clear stale local bind; UI shows "License not found" then opens role select.
+      stopCrmServer();
+      clearSecureStore();
+      getInstallationMode().clearMode();
+      const e = new Error('License not found') as Error & { statusCode?: number; code?: string };
+      e.statusCode = 404;
+      e.code = 'LICENSE_NOT_FOUND';
+      throw e;
+    }
     throw err instanceof Error ? err : new Error('Transfer request failed');
   }
 });
@@ -1046,9 +1134,7 @@ ipcMain.handle('install-mode:continue', async () => {
 });
 
 ipcMain.handle('install-mode:reset-to-role-select', async () => {
-  getInstallationMode().clearMode();
-  reloadShellUI();
-  mainWindow?.webContents.send('app:state', 'role-select');
+  await resetToRoleSelectFresh();
   return { success: true };
 });
 
@@ -1138,4 +1224,8 @@ ipcMain.handle('store:reset-for-new-license', async () => {
       `${message}\n\nIf this keeps failing: close InsureCRM Desktop, ${closeHint}, then reopen the app and try again.`
     );
   }
+});
+
+ipcMain.handle('app:hardware-id', () => {
+  try { return machineIdSync(true); } catch { return null; }
 });

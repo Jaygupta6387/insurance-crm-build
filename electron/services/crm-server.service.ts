@@ -106,6 +106,7 @@ export const startCrmServer = async (env: Record<string, string>): Promise<numbe
     RATE_LIMIT_WINDOW_MS: '900000',
     RATE_LIMIT_MAX: shareOnWifi ? '5000' : '2000',
     AUTH_RATE_LIMIT_MAX: shareOnWifi ? '30' : '20',
+    BCRYPT_ROUNDS: '12',
     FRONTEND_URL: `http://127.0.0.1:${crmPort}`,
     FRONTEND_RESET_PASSWORD_URL: `http://127.0.0.1:${crmPort}`,
     DATABASE_URL: env.DESKTOP_DATABASE_URL || env.DATABASE_URL || '',
@@ -124,6 +125,7 @@ export const startCrmServer = async (env: Record<string, string>): Promise<numbe
     DESKTOP_PLAN_TYPE: env.DESKTOP_PLAN_TYPE || '',
     DESKTOP_SUBSCRIPTION_END: env.DESKTOP_SUBSCRIPTION_END || '',
     DESKTOP_MAX_EMPLOYEES: env.DESKTOP_MAX_EMPLOYEES || '',
+    DESKTOP_MAIL_JSON: env.DESKTOP_MAIL_JSON || '',
   });
 
   // Never inherit local-dev license bypass into the CRM child (release or accidental shell env).

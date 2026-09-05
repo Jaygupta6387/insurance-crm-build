@@ -27,6 +27,8 @@ export interface SecureStoreData {
   maxEmployees?: number;
   enabledFeatures?: string[];
   featureMap?: Record<string, string>;
+  /** Super Admin SMTP provisioned via license activate/heartbeat */
+  mailJson?: string;
   savedServerUrl?: string;
   /** Per-install JWT signing secrets (never use shared defaults in release). */
   jwtAccessSecret?: string;

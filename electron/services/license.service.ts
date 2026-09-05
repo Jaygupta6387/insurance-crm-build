@@ -21,11 +21,22 @@ const cloudError = (err: unknown, fallback: string): Error & { statusCode?: numb
       'This license is already used on another system. Contact your administrator to reset hardware.';
   } else if (status === 404 && /invalid license/i.test(message)) {
     message = 'Invalid license key';
+  } else if (status === 404 || /license not found/i.test(message)) {
+    message = 'License not found';
   }
 
   const error = new Error(message) as Error & { statusCode?: number };
   if (status) error.statusCode = status;
   return error;
+};
+
+export const isLicenseNotFoundError = (err: unknown): boolean => {
+  const statusCode =
+    err && typeof err === 'object' && 'statusCode' in err
+      ? Number((err as { statusCode?: number }).statusCode)
+      : undefined;
+  const message = err instanceof Error ? err.message : String(err);
+  return statusCode === 404 || /license not found/i.test(message);
 };
 
 export interface ActivationResult {
@@ -41,6 +52,18 @@ export interface ActivationResult {
   license_token: string;
   features?: Record<string, string>;
   enabled_features?: string[];
+  mail?: {
+    smtp_email?: string;
+    smtp_password?: string;
+    from_name?: string;
+    smtp_host?: string;
+    smtp_port?: number;
+    smtp_secure?: boolean;
+    allow_policy_customer_email?: boolean;
+    policy_customer_email_subject?: string | null;
+    policy_customer_email_html?: string | null;
+    provisioned_by?: string;
+  } | null;
 }
 
 export const activateLicense = async (
