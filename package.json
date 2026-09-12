@@ -1,6 +1,6 @@
 {
   "name": "insurecrm-desktop",
-  "version": "1.4.63",
+  "version": "1.4.112",
   "description": "InsureCRM Desktop — local PostgreSQL + cloud license",
   "main": "out/main/index.js",
   "author": "InsureCRM",
@@ -30,7 +30,6 @@
     "systeminformation": "^5.23.5"
   },
   "devDependencies": {
-    "esbuild": "^0.24.0",
     "@types/node": "^22.10.2",
     "@types/pg": "^8.20.0",
     "@types/react": "^18.3.12",
@@ -39,6 +38,7 @@
     "electron": "^33.2.1",
     "electron-builder": "^25.1.8",
     "electron-vite": "^2.3.0",
+    "esbuild": "^0.24.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "typescript": "^5.7.2",

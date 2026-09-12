@@ -1,14 +1,17 @@
 /**
  * UDPDiscoveryClientService — client-side LAN server discovery.
  *
- * Listens for Admin PC UDP broadcasts on port 47912 and resolves the
- * Admin address automatically (no manual IP entry).
+ * Listens for Admin UDP announces on port 47912 and also sends discovery
+ * probes (broadcast) so Admin can reply unicast when one-way broadcast
+ * is filtered (common on mixed Mac Admin → Windows Employee Wi‑Fi).
  */
 
 import * as dgram from 'dgram';
+import * as os from 'os';
 
 export const DISCOVERY_PORT = 47912;
 export const DISCOVERY_TIMEOUT_MS = 25_000;
+const PROBE_INTERVAL_MS = 1_500;
 
 export interface DiscoveryPacket {
   app: string;
@@ -20,6 +23,7 @@ export interface DiscoveryPacket {
   port: number;
   timestamp: number;
   signature: string;
+  type?: string;
 }
 
 export interface DiscoveryResult {
@@ -31,9 +35,14 @@ export interface DiscoveryResult {
   version: string;
 }
 
+function isIpv4(addr: os.NetworkInterfaceInfo): boolean {
+  return addr.family === 'IPv4' || (addr.family as unknown) === 4;
+}
+
 export class UDPDiscoveryClientService {
   private socket: dgram.Socket | null = null;
   private timer: NodeJS.Timeout | null = null;
+  private probeTimer: NodeJS.Timeout | null = null;
   private signSecret: string;
 
   /**
@@ -70,11 +79,11 @@ export class UDPDiscoveryClientService {
       this.socket.on('message', (buf, rinfo) => {
         try {
           const packet: DiscoveryPacket = JSON.parse(buf.toString('utf8'));
+          // Ignore our own probes echoing back
+          if (packet.type === 'discover' || packet.type === 'probe') return;
           if (!this._validate(packet)) return;
 
-          // The UDP sender address is the interface that actually reached this
-          // Employee PC. The advertised address can be a VPN/VM adapter and is
-          // therefore only retained as a fallback hint.
+          // Prefer the UDP sender address (real interface that reached us).
           const ip = rinfo.address;
           const advertisedIp =
             packet.ip && packet.ip !== rinfo.address ? packet.ip : undefined;
@@ -97,13 +106,14 @@ export class UDPDiscoveryClientService {
         }
       });
 
-      // Bind to all interfaces so Wi‑Fi broadcasts are received (esp. on Windows)
       this.socket.bind({ port: DISCOVERY_PORT, address: '0.0.0.0', exclusive: false }, () => {
         try {
           this.socket?.setBroadcast(true);
         } catch {
           /* ignore */
         }
+        this._sendProbe();
+        this.probeTimer = setInterval(() => this._sendProbe(), PROBE_INTERVAL_MS);
       });
 
       this.timer = setTimeout(() => {
@@ -123,17 +133,59 @@ export class UDPDiscoveryClientService {
     this._cleanup();
   }
 
+  private _sendProbe() {
+    if (!this.socket) return;
+    const probe = Buffer.from(
+      JSON.stringify({
+        app: 'InsuredHub',
+        type: 'discover',
+        timestamp: Date.now(),
+      }),
+      'utf8'
+    );
+    const targets = new Set(['255.255.255.255', ...this._broadcastAddresses()]);
+    for (const target of targets) {
+      try {
+        this.socket.send(probe, 0, probe.length, DISCOVERY_PORT, target, () => {});
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  private _broadcastAddresses(): string[] {
+    const results: string[] = [];
+    try {
+      for (const iface of Object.values(os.networkInterfaces())) {
+        for (const addr of iface || []) {
+          if (!isIpv4(addr) || addr.internal || !addr.netmask) continue;
+          if (addr.address.startsWith('169.254.')) continue;
+          const ipParts = addr.address.split('.').map(Number);
+          const maskParts = addr.netmask.split('.').map(Number);
+          if (ipParts.length !== 4 || maskParts.length !== 4) continue;
+          results.push(
+            ipParts
+              .map((part, i) => (part & maskParts[i]) | (~maskParts[i] & 0xff))
+              .join('.')
+          );
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    return results;
+  }
+
   private _validate(packet: DiscoveryPacket): boolean {
     if (packet.app !== 'InsuredHub') return false;
     if (!packet.port) return false;
+    if (!packet.serverId) return false;
 
     // Allow generous clock skew (5 minutes) — Windows vs Mac clocks often drift
     const drift = Math.abs(Date.now() - Number(packet.timestamp || 0));
     if (!packet.timestamp || drift > 300_000) return false;
 
-    // HMAC only when both sides share a secret (Employee PCs usually pass '')
     if (this.signSecret) {
-      // Soft-fail: don't block discovery on signature mismatch in the field
       try {
         const crypto = require('crypto') as typeof import('crypto');
         const data = JSON.stringify({
@@ -163,6 +215,10 @@ export class UDPDiscoveryClientService {
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
+    }
+    if (this.probeTimer) {
+      clearInterval(this.probeTimer);
+      this.probeTimer = null;
     }
     if (this.socket) {
       try {

@@ -458,15 +458,25 @@ const launchCrm = async (store: ReturnType<typeof loadSecureStore>): Promise<str
     try {
       const os = await import('os');
       let lanIp = '127.0.0.1';
-      for (const iface of Object.values(os.networkInterfaces())) {
+      const scored: { ip: string; score: number }[] = [];
+      for (const [name, iface] of Object.entries(os.networkInterfaces())) {
         for (const addr of iface || []) {
-          if (addr.family === 'IPv4' && !addr.internal) {
-            lanIp = addr.address;
-            break;
-          }
+          const v4 = addr.family === 'IPv4' || (addr.family as unknown) === 4;
+          if (!v4 || addr.internal || addr.address.startsWith('169.254.')) continue;
+          const isPrivate =
+            addr.address.startsWith('10.') ||
+            addr.address.startsWith('192.168.') ||
+            /^172\.(1[6-9]|2\d|3[01])\./.test(addr.address);
+          const isVirtual = /^(utun|tun|tap|vmnet|vbox|docker|bridge|ap|awdl|llw)/i.test(name);
+          const isPreferred = /^(en\d+|eth\d+|wlan\d+|wi-?fi|ethernet)/i.test(name);
+          scored.push({
+            ip: addr.address,
+            score: (isPrivate ? 10 : 0) + (isPreferred ? 5 : 0) + (isVirtual ? -20 : 0),
+          });
         }
-        if (lanIp !== '127.0.0.1') break;
       }
+      scored.sort((a, b) => b.score - a.score);
+      if (scored.length) lanIp = scored[0].ip;
       const port = getCrmPort();
       trayService?.updateServerInfo({
         status: 'Running (Admin / Wi‑Fi)',
@@ -1146,6 +1156,7 @@ ipcMain.handle('license:enroll-employee', async () => {
 
 ipcMain.handle('server:retry-discovery', async () => {
   mainWindow?.webContents.send('app:state', 'discovering');
+  serverConnectionService?.abortRace();
   await _discoverAndConnect();
   return { success: true };
 });

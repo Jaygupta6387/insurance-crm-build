@@ -120,6 +120,10 @@ export class ServerConnectionService extends EventEmitter {
   }
 
   async discoverAndConnect(): Promise<DiscoveryResult> {
+    // Always cancel any in-flight race first — "Search again" used to stack
+    // concurrent races that fought over UDP 47912 and aborted each other.
+    this.abortRace();
+
     this._notify('Searching for Admin PC on this Wi‑Fi…', 'discovering');
 
     const savedUrl = this._getSavedServerUrl();
@@ -168,6 +172,8 @@ export class ServerConnectionService extends EventEmitter {
       ipcMain.removeListener('server:manual-address-response', this._manualHandler);
       this._manualHandler = null;
     }
+    for (const timer of this._raceTimers) clearTimeout(timer);
+    this._raceTimers.clear();
     if (this._raceReject) {
       const reject = this._raceReject;
       this._raceReject = null;
@@ -251,7 +257,7 @@ export class ServerConnectionService extends EventEmitter {
           }
         });
       };
-      this._trackTimer(setTimeout(scanRepeatedly, 1_500));
+      this._trackTimer(setTimeout(scanRepeatedly, 400));
 
       this._trackTimer(setTimeout(() => {
         if (settled) return;
@@ -322,13 +328,18 @@ export class ServerConnectionService extends EventEmitter {
     const prefixes = this._localSubnetPrefixes();
     if (!prefixes.length) return null;
 
+    // Prefer likely Admin hosts first (.1 gateway/router area, then low DHCP range).
     const hosts: string[] = [];
+    const priority = [1, 2, 3, 4, 5, 10, 20, 50, 100, 101, 102, 110, 150, 200];
     for (const prefix of prefixes) {
-      for (let i = 1; i <= 254; i++) hosts.push(`${prefix}.${i}`);
+      for (const i of priority) hosts.push(`${prefix}.${i}`);
+      for (let i = 1; i <= 254; i++) {
+        if (!priority.includes(i)) hosts.push(`${prefix}.${i}`);
+      }
     }
 
     const deadline = Date.now() + SCAN_TIMEOUT_MS;
-    const concurrency = 50;
+    const concurrency = 60;
     let index = 0;
     let found: string | null = null;
 
@@ -348,7 +359,7 @@ export class ServerConnectionService extends EventEmitter {
           const host = hosts[index++];
           inFlight += 1;
           const url = `http://${host}:${ADMIN_CRM_PORT}`;
-          void this._probeHealthOnly(url, 700)
+          void this._probeHealthOnly(url, 600)
             .then((ok) => {
               inFlight -= 1;
               if (ok && !found) {
@@ -378,7 +389,9 @@ export class ServerConnectionService extends EventEmitter {
     try {
       for (const iface of Object.values(os.networkInterfaces())) {
         for (const addr of iface || []) {
-          if (addr.family !== 'IPv4' || addr.internal) continue;
+          const v4 = addr.family === 'IPv4' || (addr.family as unknown) === 4;
+          if (!v4 || addr.internal) continue;
+          if (addr.address.startsWith('169.254.')) continue;
           const parts = addr.address.split('.');
           if (parts.length === 4) prefixes.add(parts.slice(0, 3).join('.'));
         }
